@@ -224,6 +224,7 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
     </div>
     <div class="tmeta">
       <div class="mtag">更新於 <span id="updAt">—</span></div>
+      <div class="mtag" id="price-status" style="color:var(--muted)">股價載入中...</div>
       <button class="rbtn" id="rbtn" onclick="fetchData()">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <polyline points="1 4 1 10 7 10"/>
@@ -349,6 +350,7 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
               <th>購買價</th>
               <th>股數</th>
               <th>現價</th>
+              <th>今日漲跌</th>
               <th>總投資額</th>
               <th>市值</th>
               <th>損益</th>
@@ -462,20 +464,83 @@ async function fetchData() {
   btn.classList.add('sp');
 
   try {
+    // ① 先從 Google Sheets 抓持股基本資料
     const res  = await fetch(CSV_URL + Date.now());
     if (!res.ok) throw new Error(`HTTP ${res.status} — 請確認 Google Sheets 已發佈至網路`);
     const text = await res.text();
     if (!text || text.length < 10) throw new Error('回傳資料為空，請確認試算表有資料');
     const data = parseCSV(text);
     if (!data) throw new Error('解析失敗 — 請確認資料從第2行開始，且至少有股票名稱、總投資額、市值欄位');
+
+    // ② 先用 Google Sheets 資料渲染，讓畫面立即顯示
     render(data);
-    document.getElementById('updAt').textContent =
-      new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+
+    // ③ 再非同步撈即時股價更新
+    fetchLivePrices(data);
+
   } catch (e) {
     showError(e.message);
   } finally {
     btn.classList.remove('sp');
   }
+}
+
+// ── 即時股價（Yahoo Finance）────────────────────────────────
+// 台股代號：純數字自動加 .TW，美股直接用原代號
+function toYahooCode(code) {
+  const c = code.trim().replace(/\.TW$/i, '');
+  return /^\d+$/.test(c) ? c + '.TW' : code.toUpperCase();
+}
+
+async function fetchLivePrices(data) {
+  const priceEl = document.getElementById('price-status');
+  if (priceEl) priceEl.textContent = '股價更新中...';
+
+  const stocks = data.stocks;
+  let updated = 0;
+
+  // Yahoo Finance：逐一查詢（避免 CORS proxy 限制）
+  const PROXY = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+
+  await Promise.all(stocks.map(async (s) => {
+    if (!s.code) return;
+    const sym = toYahooCode(s.code);
+    try {
+      const r = await fetch(`${PROXY}${sym}?interval=1d&range=1d`);
+      if (!r.ok) return;
+      const j = await r.json();
+      const meta = j?.chart?.result?.[0]?.meta;
+      if (!meta) return;
+
+      const livePrice = meta.regularMarketPrice ?? meta.chartPreviousClose;
+      const prevClose = meta.previousClose ?? meta.chartPreviousClose;
+      if (!livePrice) return;
+
+      s.livePrice  = livePrice;
+      s.liveChange = prevClose ? (livePrice - prevClose) / prevClose * 100 : 0;
+      s.liveMktVal = livePrice * s.shares;
+      s.livePnl    = s.liveMktVal - s.cost;
+      s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
+      updated++;
+    } catch (_) {}
+  }));
+
+  if (updated === 0) {
+    if (priceEl) priceEl.textContent = '股價撈取失敗（Yahoo API 限制）';
+    return;
+  }
+
+  // 重新計算總覽（用即時數據）
+  const tc = stocks.reduce((a, s) => a + s.cost, 0);
+  const tv = stocks.reduce((a, s) => a + (s.liveMktVal ?? s.mktVal), 0);
+  data.total = { cost: tc, val: tv, pnl: tv - tc, roi: tc ? (tv - tc) / tc * 100 : 0 };
+
+  render(data, true); // true = 用即時股價
+
+  const now = new Date();
+  document.getElementById('updAt').textContent =
+    now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' 即時';
+  if (priceEl) priceEl.textContent = `${updated}/${stocks.length} 檔即時股價`;
 }
 
 // ── 顯示錯誤 ────────────────────────────────────────────────
@@ -487,17 +552,26 @@ function showError(msg) {
 }
 
 // ── 主渲染入口 ───────────────────────────────────────────────
-function render(data) {
+function render(data, isLive = false) {
   document.getElementById('loading').classList.add('hide');
   document.getElementById('error-box').style.display = 'none';
   document.getElementById('app').style.display = 'block';
 
-  renderKpi(data.total, data.stocks.length);
-  renderTable(data.stocks);
-  renderCharts(data.stocks);
-  renderRanks(data.stocks);
+  // 若有即時股價，把每股的顯示數據替換掉
+  const display = data.stocks.map(s => ({
+    ...s,
+    price:  isLive && s.livePrice  != null ? s.livePrice  : s.price,
+    mktVal: isLive && s.liveMktVal != null ? s.liveMktVal : s.mktVal,
+    pnl:    isLive && s.livePnl    != null ? s.livePnl    : s.pnl,
+    roi:    isLive && s.liveRoi    != null ? s.liveRoi    : s.roi,
+    change: isLive && s.liveChange != null ? s.liveChange : null,
+  }));
 
-  // 數字閃爍動畫（資料刷新提示）
+  renderKpi(data.total, display.length);
+  renderTable(display, isLive);
+  renderCharts(display);
+  renderRanks(display);
+
   document.querySelectorAll('.kval').forEach(el => {
     el.classList.remove('nf');
     void el.offsetWidth;
@@ -537,16 +611,21 @@ function renderKpi(t, cnt) {
 }
 
 // ── 持股明細表 ───────────────────────────────────────────────
-function renderTable(stocks) {
+function renderTable(stocks, isLive = false) {
   document.getElementById('tbl-cnt').textContent = stocks.length + ' 筆';
   document.getElementById('tbody').innerHTML = stocks.map(s => {
-    const up = s.pnl >= 0;
+    const up  = s.pnl >= 0;
+    const chg = s.change;
+    const chgCell = isLive && chg != null
+      ? `<td class="${chg >= 0 ? 'cg' : 'cr'}">${(chg >= 0 ? '+' : '') + fl(chg)}%</td>`
+      : `<td class="cm">—</td>`;
     return `<tr>
       <td>${s.name}</td>
       <td>${s.code}</td>
       <td style="color:var(--muted2)">${fl(s.buyPrice, 2)}</td>
       <td style="color:var(--muted2)">${s.shares.toLocaleString()}</td>
       <td>${fl(s.price, 2)}</td>
+      ${chgCell}
       <td style="color:var(--muted2)">NT$${f(s.cost)}</td>
       <td>NT$${f(s.mktVal)}</td>
       <td class="${up ? 'cg' : 'cr'}">${pn(s.pnl)}</td>
