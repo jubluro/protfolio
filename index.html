@@ -382,10 +382,23 @@ const sn  = (s)       => s.name.length > 5 ? s.name.slice(0,4)+'…' : s.name;
 // ── 圖表實例 ────────────────────────────────────────────────
 let charts = {};
 
-// ── 解析數字（處理逗號、空白）───────────────────────────────
+// ── 解析數字（處理逗號、空白、$）──────────────────────────
 function parseNum(s) {
-  const n = parseFloat(String(s || '').replace(/[,\s$%]/g, ''));
+  const n = parseFloat(String(s || '').replace(/[,\s$]/g, ''));
   return isNaN(n) ? 0 : n;
+}
+
+// ── 解析損益%（專門處理有無 % 符號兩種情況）────────────────
+function parseRoi(s) {
+  const str = String(s || '').trim();
+  const hasPct = str.includes('%');
+  const n = parseFloat(str.replace(/[,\s$%]/g, ''));
+  if (isNaN(n)) return 0;
+  // 有 % 號：直接就是百分比數值（如 "-4.02%" → -4.02）
+  if (hasPct) return n;
+  // 無 % 號：若絕對值 < 5 視為小數比例，自動轉換（如 -0.04 → -4）
+  if (Math.abs(n) < 5 && n !== 0) return n * 100;
+  return n;
 }
 
 // ── 解析 CSV（處理引號包覆的欄位）──────────────────────────
@@ -422,7 +435,7 @@ function parseCSV(text) {
     if (SUMMARY.includes(name.toLowerCase())) {
       totalRow = {
         cost: parseNum(r[5]), val: parseNum(r[6]),
-        pnl:  parseNum(r[7]), roi: parseNum(r[8])
+        pnl:  parseNum(r[7]), roi: parseRoi(r[8])
       };
       continue;
     }
@@ -435,12 +448,10 @@ function parseCSV(text) {
       cost:     parseNum(r[5]),
       mktVal:   parseNum(r[6]),
       pnl:      parseNum(r[7]),
-      roi:      parseNum(r[8])
+      roi:      parseRoi(r[8])
     };
     // 跳過完全空白的資料列
     if (s.cost === 0 && s.mktVal === 0 && s.buyPrice === 0 && !s.name) continue;
-    // 若 roi 是小數比例自動轉為百分比（如 0.13 → 13）
-    if (s.roi !== 0 && Math.abs(s.roi) < 5) s.roi *= 100;
     stocks.push(s);
   }
 
@@ -452,7 +463,7 @@ function parseCSV(text) {
     const tv = stocks.reduce((a, s) => a + s.mktVal, 0);
     totalRow = { cost: tc, val: tv, pnl: tv - tc, roi: tc ? (tv - tc) / tc * 100 : 0 };
   } else {
-    if (totalRow.roi !== 0 && Math.abs(totalRow.roi) < 5) totalRow.roi *= 100;
+    totalRow.roi = parseRoi(String(totalRow.roi));
   }
 
   return { stocks, total: totalRow };
