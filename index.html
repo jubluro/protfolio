@@ -534,11 +534,26 @@ async function fetchData() {
   }
 }
 
-// ── 即時股價（Yahoo Finance）────────────────────────────────
-// 台股代號：純數字自動加 .TW，美股直接用原代號
+// ── 股票代號轉換（上市.TW / 上櫃.TWO）──────────────────────
+// 上櫃常見代號：4碼數字開頭為 4xxx、6xxx、8xxx、00xxx (ETF) 等
+// 最可靠方式：先試 .TW，若失敗再試 .TWO
 function toYahooCode(code) {
-  const c = code.trim().replace(/\.TW$/i, '');
-  return /^\d+$/.test(c) ? c + '.TW' : code.toUpperCase();
+  const c = code.trim().replace(/\.(TW|TWO)$/i, '');
+  if (!/^\d+$/.test(c)) return c.toUpperCase(); // 美股
+  return c; // 回傳純代號，後面動態決定 .TW 或 .TWO
+}
+
+async function resolveSymbol(code) {
+  const c = code.trim().replace(/\.(TW|TWO)$/i, '');
+  if (!/^\d+$/.test(c)) return c.toUpperCase();
+  // 先試上市 .TW
+  try {
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${c}.TW?interval=1d&range=1d`);
+    const j = await r.json();
+    if (j?.chart?.result?.[0]?.meta?.regularMarketPrice) return c + '.TW';
+  } catch(_) {}
+  // 再試上櫃 .TWO
+  return c + '.TWO';
 }
 
 async function fetchLivePrices(data) {
@@ -548,14 +563,12 @@ async function fetchLivePrices(data) {
   const stocks = data.stocks;
   let updated = 0;
 
-  // Yahoo Finance：逐一查詢（避免 CORS proxy 限制）
-  const PROXY = 'https://query1.finance.yahoo.com/v8/finance/chart/';
-
   await Promise.all(stocks.map(async (s) => {
     if (!s.code) return;
-    const sym = toYahooCode(s.code);
+    const sym = await resolveSymbol(s.code);
+    s._sym = sym; // 記住解析好的代號供股利使用
     try {
-      const r = await fetch(`${PROXY}${sym}?interval=1d&range=1d`);
+      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`);
       if (!r.ok) return;
       const j = await r.json();
       const meta = j?.chart?.result?.[0]?.meta;
@@ -595,97 +608,73 @@ async function fetchLivePrices(data) {
   fetchDividends(stocks);
 }
 
-// ── 股利資訊（台灣證交所 Open API via CORS Proxy）──────────
+// ── 股利資訊（證交所上市 + 櫃買中心上櫃）──────────────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
+  const PROXY = 'https://corsproxy.io/?';
+  const TWSE_URL = 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL';
+  const TPEX_URL = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_anal';
+
+  let map = {};
+
   try {
-    // 用 corsproxy.io 繞過 CORS，抓證交所殖利率 + 本益比 + 淨值比（全市場）
-    const PROXY = 'https://corsproxy.io/?';
-    const TWSE  = 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL';
-    const r = await fetch(PROXY + encodeURIComponent(TWSE));
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const all = await r.json();
-
-    // 建立查詢 map：股票代號 → 資料
-    const map = {};
-    all.forEach(item => { map[item.Code] = item; });
-
-    let totalDiv = 0, totalCost = 0, matchCount = 0;
-
-    const rows = stocks.map(s => {
-      const code = s.code.trim().replace(/\.TW$/i, '');
-      const d = map[code];
-      if (!d) return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
-
-      const divYield    = parseFloat(d.DividendYield) || null;  // 殖利率 %
-      const per         = parseFloat(d.PEratio)        || null;
-      const pbr         = parseFloat(d.PBratio)        || null;
-      const usePrice    = s.livePrice || s.price || s.buyPrice;
-      // 每股股利 = 殖利率% ÷ 100 × 現價
-      const divPerShare = (divYield && usePrice) ? parseFloat((divYield / 100 * usePrice).toFixed(2)) : null;
-      const annualDiv   = divPerShare ? divPerShare * s.shares : null;
-
-      if (annualDiv) { totalDiv += annualDiv; matchCount++; }
-      totalCost += s.cost;
-
-      return { ...s, divYield, divPerShare, annualDiv, per, pbr };
-    });
-
-    // KPI 更新
-    if (matchCount > 0) {
-      document.getElementById('k-divamt').textContent = 'NT$' + Math.round(totalDiv).toLocaleString('zh-TW');
-      document.getElementById('k-divamt-sub').textContent = `預估年收股利（${matchCount} 檔）`;
-      const avgYield = totalCost > 0 ? totalDiv / totalCost * 100 : 0;
-      document.getElementById('k-divy').textContent = avgYield.toFixed(2) + '%';
-    } else {
-      document.getElementById('k-divamt').textContent = '—';
-      document.getElementById('k-divamt-sub').textContent = '無股利資料';
-      document.getElementById('k-divy').textContent = '—';
+    // 上市（證交所）
+    const r1 = await fetch(PROXY + encodeURIComponent(TWSE_URL));
+    if (r1.ok) {
+      const d1 = await r1.json();
+      d1.forEach(item => {
+        map[item.Code] = {
+          divYield: parseFloat(item.DividendYield) || null,
+          per:      parseFloat(item.PEratio)        || null,
+          pbr:      parseFloat(item.PBratio)        || null,
+        };
+      });
     }
+  } catch(_) {}
 
-    renderDivTable(rows);
-    if (statusEl) statusEl.textContent =
-      `${matchCount}/${stocks.length} 檔・台灣證交所即時`;
+  try {
+    // 上櫃（櫃買中心）
+    const r2 = await fetch(PROXY + encodeURIComponent(TPEX_URL));
+    if (r2.ok) {
+      const d2 = await r2.json();
+      d2.forEach(item => {
+        const code = item.SecuritiesCompanyCode || item.Code || item.code;
+        if (!code) return;
+        map[code] = {
+          divYield: parseFloat(item.DividendYield || item.Yield) || null,
+          per:      parseFloat(item.PriceEarningRatio || item.PEratio) || null,
+          pbr:      parseFloat(item.PriceBookRatio   || item.PBratio) || null,
+        };
+      });
+    }
+  } catch(_) {}
 
-  } catch (e) {
-    // Proxy 失敗時 fallback：用 Yahoo Finance dividendRate
-    if (statusEl) statusEl.textContent = 'TWSE 讀取失敗，改用 Yahoo Finance...';
-    await fetchDividendsYahoo(stocks);
-  }
-}
-
-// ── Fallback：Yahoo Finance 股利 ─────────────────────────────
-async function fetchDividendsYahoo(stocks) {
-  const statusEl = document.getElementById('div-status');
   let totalDiv = 0, totalCost = 0, matchCount = 0;
 
-  const rows = await Promise.all(stocks.map(async (s) => {
-    const code = s.code.trim().replace(/\.TW$/i, '');
-    const sym  = /^\d+$/.test(code) ? code + '.TW' : code.toUpperCase();
-    try {
-      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`);
-      if (!r.ok) return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
-      const j    = await r.json();
-      const meta = j?.chart?.result?.[0]?.meta;
-      if (!meta) return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
+  const rows = stocks.map(s => {
+    const code = s.code.trim().replace(/\.(TW|TWO)$/i, '');
+    const d = map[code];
 
-      const divPerShare = meta.dividendRate || null;
-      const usePrice    = meta.regularMarketPrice || s.price;
-      const divYield    = divPerShare && usePrice ? divPerShare / usePrice * 100 : null;
-      const annualDiv   = divPerShare ? divPerShare * s.shares : null;
-      const per         = meta.trailingPE   || null;
-      const pbr         = meta.priceToBook  || null;
+    // 若 map 查不到，嘗試用殖利率從 Yahoo meta 估算
+    const usePrice = s.livePrice || s.price || s.buyPrice;
 
-      if (annualDiv) { totalDiv += annualDiv; matchCount++; }
+    if (!d || !d.divYield) {
       totalCost += s.cost;
-      return { ...s, divYield, divPerShare, annualDiv, per, pbr };
-    } catch (_) {
-      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
+      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: d?.per || null, pbr: d?.pbr || null };
     }
-  }));
 
+    const divPerShare = parseFloat((d.divYield / 100 * usePrice).toFixed(2));
+    const annualDiv   = divPerShare * s.shares;
+
+    if (annualDiv) { totalDiv += annualDiv; matchCount++; }
+    totalCost += s.cost;
+
+    return { ...s, divYield: d.divYield, divPerShare, annualDiv, per: d.per, pbr: d.pbr };
+  });
+
+  // KPI
   if (matchCount > 0) {
     document.getElementById('k-divamt').textContent = 'NT$' + Math.round(totalDiv).toLocaleString('zh-TW');
     document.getElementById('k-divamt-sub').textContent = `預估年收股利（${matchCount} 檔）`;
@@ -699,7 +688,9 @@ async function fetchDividendsYahoo(stocks) {
 
   renderDivTable(rows);
   if (statusEl) statusEl.textContent =
-    matchCount > 0 ? `${matchCount}/${stocks.length} 檔・Yahoo Finance` : '無股利資料';
+    matchCount > 0
+      ? `${matchCount}/${stocks.length} 檔・證交所+櫃買中心即時`
+      : '無對應股利資料';
 }
 
 function renderDivTable(rows) {
