@@ -537,74 +537,70 @@ async function fetchData() {
 // ── 股票代號轉換（上市.TW / 上櫃.TWO）──────────────────────
 // 上櫃常見代號：4碼數字開頭為 4xxx、6xxx、8xxx、00xxx (ETF) 等
 // 最可靠方式：先試 .TW，若失敗再試 .TWO
-function toYahooCode(code) {
-  const c = code.trim().replace(/\.(TW|TWO)$/i, '');
-  if (!/^\d+$/.test(c)) return c.toUpperCase(); // 美股
-  return c; // 回傳純代號，後面動態決定 .TW 或 .TWO
-}
-
-async function resolveSymbol(code) {
-  const c = code.trim().replace(/\.(TW|TWO)$/i, '');
-  if (!/^\d+$/.test(c)) return c.toUpperCase();
-  // 先試上市 .TW
-  try {
-    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${c}.TW?interval=1d&range=1d`);
-    const j = await r.json();
-    if (j?.chart?.result?.[0]?.meta?.regularMarketPrice) return c + '.TW';
-  } catch(_) {}
-  // 再試上櫃 .TWO
-  return c + '.TWO';
-}
-
+// ── 即時股價（台灣證交所 mis API，上市+上櫃一次查全部）─────
 async function fetchLivePrices(data) {
   const priceEl = document.getElementById('price-status');
   if (priceEl) priceEl.textContent = '股價更新中...';
-
   const stocks = data.stocks;
-  let updated = 0;
+  const twStocks = stocks.filter(s => /^\d+$/.test(s.code.replace(/\.(TW|TWO)$/i, '')));
+  if (!twStocks.length) { if(priceEl) priceEl.textContent = '無台股'; return; }
 
-  await Promise.all(stocks.map(async (s) => {
-    if (!s.code) return;
-    const sym = await resolveSymbol(s.code);
-    s._sym = sym; // 記住解析好的代號供股利使用
+  // 先用 tse_ 查所有股票，失敗的改用 otc_ 補查
+  const buildUrl = (list) =>
+    `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(list.join('|'))}&json=1&delay=0&_=${Date.now()}`;
+
+  const parseMis = async (codes, prefix) => {
     try {
-      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`);
-      if (!r.ok) return;
+      const exList = codes.map(c => `${prefix}_${c}.tw`);
+      const r = await fetch(buildUrl(exList));
       const j = await r.json();
-      const meta = j?.chart?.result?.[0]?.meta;
-      if (!meta) return;
+      return j?.msgArray || [];
+    } catch(_) { return []; }
+  };
 
-      const livePrice = meta.regularMarketPrice ?? meta.chartPreviousClose;
-      const prevClose = meta.previousClose ?? meta.chartPreviousClose;
-      if (!livePrice) return;
+  const codes = twStocks.map(s => s.code.replace(/\.(TW|TWO)$/i, ''));
 
-      s.livePrice  = livePrice;
-      s.liveChange = prevClose ? (livePrice - prevClose) / prevClose * 100 : 0;
-      s.liveMktVal = livePrice * s.shares;
-      s.livePnl    = s.liveMktVal - s.cost;
-      s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
-      updated++;
-    } catch (_) {}
-  }));
+  // 先全部以 tse_ 查
+  const tseRes = await parseMis(codes, 'tse');
+  const tseMap = {}; tseRes.forEach(d => { tseMap[d.c] = d; });
 
-  if (updated === 0) {
-    if (priceEl) priceEl.textContent = '股價撈取失敗（Yahoo API 限制）';
-    return;
+  // 找出沒抓到或成交價是 '-' 的（上櫃），改用 otc_ 補查
+  const otcCodes = codes.filter(c => !tseMap[c] || tseMap[c].z === '-');
+  const otcMap = {};
+  if (otcCodes.length) {
+    const otcRes = await parseMis(otcCodes, 'otc');
+    otcRes.forEach(d => { otcMap[d.c] = d; });
   }
 
-  // 重新計算總覽（用即時數據）
+  let updated = 0;
+  twStocks.forEach(s => {
+    const code = s.code.replace(/\.(TW|TWO)$/i, '');
+    const d = tseMap[code]?.z !== '-' ? tseMap[code] : otcMap[code];
+    if (!d) return;
+    const price = parseFloat(d.z !== '-' ? d.z : d.y) || null;
+    const prev  = parseFloat(d.y) || null;
+    if (!price) return;
+    s.livePrice  = price;
+    s.liveChange = prev ? (price - prev) / prev * 100 : 0;
+    s.liveMktVal = price * s.shares;
+    s.livePnl    = s.liveMktVal - s.cost;
+    s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
+    updated++;
+  });
+
+  // 重新計算總覽
   const tc = stocks.reduce((a, s) => a + s.cost, 0);
   const tv = stocks.reduce((a, s) => a + (s.liveMktVal ?? s.mktVal), 0);
   data.total = { cost: tc, val: tv, pnl: tv - tc, roi: tc ? (tv - tc) / tc * 100 : 0 };
 
-  render(data, true); // true = 用即時股價
-
+  render(data, true);
   const now = new Date();
   document.getElementById('updAt').textContent =
     now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' 即時';
-  if (priceEl) priceEl.textContent = `${updated}/${stocks.length} 檔即時股價`;
+  if (priceEl) priceEl.textContent = updated > 0
+    ? `${updated}/${stocks.length} 檔即時股價・證交所`
+    : '非交易時間，顯示昨收';
 
-  // 股利資料（證交所）
   fetchDividends(stocks);
 }
 
