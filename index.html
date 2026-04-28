@@ -608,77 +608,57 @@ async function fetchLivePrices(data) {
   fetchDividends(stocks);
 }
 
-// ── 股利資訊（證交所上市 + 櫃買中心上櫃）──────────────────
+// ── 股利資訊（FinMind API，上市+上櫃都有）──────────────────
+// 資料來源：finmindtrade.com - TaiwanStockPER（免費、無需 token）
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
-  const PROXY = 'https://corsproxy.io/?';
-  const TWSE_URL = 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL';
-  const TPEX_URL = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_anal';
-
-  let map = {};
-
-  try {
-    // 上市（證交所）
-    const r1 = await fetch(PROXY + encodeURIComponent(TWSE_URL));
-    if (r1.ok) {
-      const d1 = await r1.json();
-      d1.forEach(item => {
-        map[item.Code] = {
-          divYield: parseFloat(item.DividendYield) || null,
-          per:      parseFloat(item.PEratio)        || null,
-          pbr:      parseFloat(item.PBratio)        || null,
-        };
-      });
-    }
-  } catch(_) {}
-
-  try {
-    // 上櫃（櫃買中心）
-    const r2 = await fetch(PROXY + encodeURIComponent(TPEX_URL));
-    if (r2.ok) {
-      const d2 = await r2.json();
-      d2.forEach(item => {
-        const code = item.SecuritiesCompanyCode || item.Code || item.code;
-        if (!code) return;
-        map[code] = {
-          divYield: parseFloat(item.DividendYield || item.Yield) || null,
-          per:      parseFloat(item.PriceEarningRatio || item.PEratio) || null,
-          pbr:      parseFloat(item.PriceBookRatio   || item.PBratio) || null,
-        };
-      });
-    }
-  } catch(_) {}
-
+  const today = new Date().toISOString().slice(0, 10);
   let totalDiv = 0, totalCost = 0, matchCount = 0;
 
-  const rows = stocks.map(s => {
+  const rows = await Promise.all(stocks.map(async (s) => {
     const code = s.code.trim().replace(/\.(TW|TWO)$/i, '');
-    const d = map[code];
-
-    // 若 map 查不到，嘗試用殖利率從 Yahoo meta 估算
-    const usePrice = s.livePrice || s.price || s.buyPrice;
-
-    if (!d || !d.divYield) {
+    if (!/^\d+$/.test(code)) {
+      // 美股不查
       totalCost += s.cost;
-      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: d?.per || null, pbr: d?.pbr || null };
+      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
     }
+    try {
+      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${code}&start_date=${today}&end_date=${today}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const rec = j?.data?.[0]; // 當日最新一筆
 
-    const divPerShare = parseFloat((d.divYield / 100 * usePrice).toFixed(2));
-    const annualDiv   = divPerShare * s.shares;
+      if (!rec) {
+        // 若今日無資料（非交易日），改抓最近一筆
+        const urlRecent = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${code}&start_date=2025-01-01&end_date=${today}`;
+        const r2 = await fetch(urlRecent);
+        const j2 = await r2.json();
+        const data2 = j2?.data;
+        if (!data2 || !data2.length) throw new Error('no data');
+        const latest = data2[data2.length - 1];
+        return buildDivRow(s, latest, { totalDiv, totalCost, matchCount });
+      }
+      return buildDivRow(s, rec, { totalDiv, totalCost, matchCount });
+    } catch (_) {
+      totalCost += s.cost;
+      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
+    }
+  }));
 
-    if (annualDiv) { totalDiv += annualDiv; matchCount++; }
-    totalCost += s.cost;
-
-    return { ...s, divYield: d.divYield, divPerShare, annualDiv, per: d.per, pbr: d.pbr };
+  // 重新計算（Promise.all 裡無法直接累加外部變數，從 rows 計算）
+  let tDiv = 0, tCost = 0, cnt = 0;
+  rows.forEach(s => {
+    tCost += s.cost;
+    if (s.annualDiv) { tDiv += s.annualDiv; cnt++; }
   });
 
-  // KPI
-  if (matchCount > 0) {
-    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(totalDiv).toLocaleString('zh-TW');
-    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${matchCount} 檔）`;
-    const avgYield = totalCost > 0 ? totalDiv / totalCost * 100 : 0;
+  if (cnt > 0) {
+    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
+    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔）`;
+    const avgYield = tCost > 0 ? tDiv / tCost * 100 : 0;
     document.getElementById('k-divy').textContent = avgYield.toFixed(2) + '%';
   } else {
     document.getElementById('k-divamt').textContent = '—';
@@ -688,9 +668,18 @@ async function fetchDividends(stocks) {
 
   renderDivTable(rows);
   if (statusEl) statusEl.textContent =
-    matchCount > 0
-      ? `${matchCount}/${stocks.length} 檔・證交所+櫃買中心即時`
-      : '無對應股利資料';
+    cnt > 0 ? `${cnt}/${stocks.length} 檔・FinMind 即時` : '無對應股利資料';
+}
+
+function buildDivRow(s, rec, _) {
+  const divYield    = parseFloat(rec.dividend_yield) || null; // 殖利率 %
+  const per         = parseFloat(rec.PER)            || null;
+  const pbr         = parseFloat(rec.PBR)            || null;
+  const usePrice    = s.livePrice || s.price || s.buyPrice;
+  const divPerShare = (divYield && usePrice)
+    ? parseFloat((divYield / 100 * usePrice).toFixed(2)) : null;
+  const annualDiv   = divPerShare ? divPerShare * s.shares : null;
+  return { ...s, divYield, divPerShare, annualDiv, per, pbr };
 }
 
 function renderDivTable(rows) {
