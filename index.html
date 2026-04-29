@@ -464,7 +464,20 @@ function parseRoi(s) {
   return n;
 }
 
-// ── 解析 CSV（處理引號包覆的欄位）──────────────────────────
+// ── 解析當日漲跌%（GOOGLEFINANCE 回傳小數如 -0.0172 = -1.72%）
+function parseChangePct(s) {
+  const str = String(s || '').trim();
+  if (!str || str === '') return null;
+  const hasPct = str.includes('%');
+  const n = parseFloat(str.replace(/[,\s$%]/g, ''));
+  if (isNaN(n)) return null;
+  // GOOGLEFINANCE changepct 已除以 100（如 -1.72% 回傳 -0.0172）
+  // 但若 Sheets 格式顯示為 % 字串（如 "-1.72%"）則直接用
+  if (hasPct) return n;
+  // 純小數且絕對值 < 1：視為比例，乘以 100
+  if (Math.abs(n) < 1 && n !== 0) return n * 100;
+  return n;
+}
 function parseCSV(text) {
   const parseRow = (line) => {
     const cols = []; let cur = '', inQ = false;
@@ -504,14 +517,15 @@ function parseCSV(text) {
     }
     const s = {
       name,
-      code:     (r[1] || '').replace(/"/g,'').trim(),
-      buyPrice: parseNum(r[2]),
-      shares:   parseNum(r[3]),
-      price:    parseNum(r[4]),
-      cost:     parseNum(r[5]),
-      mktVal:   parseNum(r[6]),
-      pnl:      parseNum(r[7]),
-      roi:      parseRoi(r[8])
+      code:      (r[1] || '').replace(/"/g,'').trim(),
+      buyPrice:  parseNum(r[2]),
+      shares:    parseNum(r[3]),
+      price:     parseNum(r[4]),
+      cost:      parseNum(r[5]),
+      mktVal:    parseNum(r[6]),
+      pnl:       parseNum(r[7]),
+      roi:       parseRoi(r[8]),
+      change:    r[9] != null && r[9] !== '' ? parseChangePct(r[9]) : null, // J欄：當日漲跌%
     };
     // 跳過完全空白的資料列
     if (s.cost === 0 && s.mktVal === 0 && s.buyPrice === 0 && !s.name) continue;
@@ -613,6 +627,42 @@ async function fetchLivePrices(data) {
     s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
     updated++;
   });
+
+  // 對仍沒有即時資料的股票，從 HiStock 補抓（透過 CORS proxy）
+  const missing = twStocks.filter(s => s.livePrice == null);
+  if (missing.length) {
+    await Promise.all(missing.map(async s => {
+      const code = s.code.replace(/\.(TW|TWO)$/i, '');
+      try {
+        const PROXY = 'https://corsproxy.io/?';
+        const url = `https://histock.tw/stock/${code}`;
+        const r = await fetch(PROXY + encodeURIComponent(url));
+        const html = await r.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        // HiStock 現價
+        const priceEl2 = doc.querySelector('#Price1_lbTPrice');
+        const price = priceEl2 ? parseFloat(priceEl2.textContent.trim()) : null;
+
+        // HiStock 漲跌幅
+        const changeEl = doc.querySelector('#Price1_lbTodayChooseRate');
+        let change = null;
+        if (changeEl) {
+          const txt = changeEl.textContent.replace('%','').trim();
+          change = parseFloat(txt) || null;
+        }
+
+        if (!price) return;
+        s.livePrice  = price;
+        s.liveChange = change;
+        s.liveMktVal = price * s.shares;
+        s.livePnl    = s.liveMktVal - s.cost;
+        s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
+        updated++;
+      } catch(_) {}
+    }));
+  }
 
   // 重新計算總覽
   const tc = stocks.reduce((a, s) => a + s.cost, 0);
@@ -745,7 +795,7 @@ function render(data, isLive = false) {
     mktVal: isLive && s.liveMktVal != null ? s.liveMktVal : s.mktVal,
     pnl:    isLive && s.livePnl    != null ? s.livePnl    : s.pnl,
     roi:    isLive && s.liveRoi    != null ? s.liveRoi    : s.roi,
-    change: isLive && s.liveChange != null ? s.liveChange : null,
+    change: isLive && s.liveChange != null ? s.liveChange : s.change,
   }));
 
   renderKpi(data.total, display.length);
