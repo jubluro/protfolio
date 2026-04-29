@@ -174,7 +174,25 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
 .pg { background: var(--green-a); color: var(--green); border: 1px solid var(--green-b); }
 .pr { background: var(--red-a);   color: var(--red);   border: 1px solid var(--red-b); }
 
-/* ── ANIMATIONS ── */
+/* ── 個股卡片 ── */
+.scard {
+  background: var(--bg1); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 14px 16px;
+  transition: border-color .2s, transform .15s; cursor: default;
+  position: relative; overflow: hidden;
+}
+.scard:hover { border-color: var(--line2); transform: translateY(-2px); }
+.scard-top { position: absolute; top: 0; left: 0; right: 0; height: 2px; }
+.scard-name { font-size: 13px; font-weight: 500; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scard-code { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 12px; }
+.scard-price { font-family: var(--bebas); font-size: 26px; letter-spacing: .04em; line-height: 1; margin-bottom: 4px; }
+.scard-change { font-family: var(--mono); font-size: 11px; margin-bottom: 10px; }
+.scard-divider { height: 1px; background: var(--line); margin-bottom: 10px; }
+.scard-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.scard-label { font-family: var(--mono); font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.scard-val { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+
+
 @keyframes fadeUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
 .kpi:nth-child(1) { animation: fadeUp .5s ease .04s both; }
 .kpi:nth-child(2) { animation: fadeUp .5s ease .09s both; }
@@ -329,20 +347,8 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
       </div>
     </div>
 
-    <!-- ROW 1: bar + donut + rank -->
-    <div class="row r3">
-      <div class="panel">
-        <div class="ph">
-          <span class="pht">各股損益</span>
-          <span class="phb" id="bar-badge">—</span>
-        </div>
-        <div class="pb">
-          <div style="position:relative;height:210px">
-            <canvas id="cBar" role="img" aria-label="各股損益長條圖"></canvas>
-          </div>
-        </div>
-      </div>
-
+    <!-- ROW 1: donut only -->
+    <div class="row" style="grid-template-columns:1fr;margin-bottom:12px">
       <div class="panel">
         <div class="ph"><span class="pht">市值佔比</span></div>
         <div class="pb">
@@ -358,46 +364,14 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
           </div>
         </div>
       </div>
-
-      <div class="panel">
-        <div class="ph"><span class="pht">排行</span></div>
-        <div class="pb">
-          <div class="rcols">
-            <div>
-              <div class="rsl cg">🏆 獲利</div>
-              <div class="rlist" id="rw"></div>
-            </div>
-            <div>
-              <div class="rsl cr">📉 虧損</div>
-              <div class="rlist" id="rl"></div>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
 
-    <!-- ROW 2: roi + compare -->
-    <div class="row r2">
-      <div class="panel">
-        <div class="ph">
-          <span class="pht">報酬率排行</span>
-          <span class="phb">依損益%</span>
-        </div>
-        <div class="pb">
-          <div style="position:relative;height:180px">
-            <canvas id="cRoi" role="img" aria-label="報酬率排行圖"></canvas>
-          </div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="ph"><span class="pht">成本 vs 市值</span></div>
-        <div class="pb">
-          <div style="position:relative;height:180px">
-            <canvas id="cCmp" role="img" aria-label="成本市值對比圖"></canvas>
-          </div>
-        </div>
-      </div>
+    <!-- 個股卡片 -->
+    <div class="ph" style="margin-bottom:10px;border:none;padding:0">
+      <span class="pht">個股總覽</span>
+      <span class="phb" id="stocks-updated">—</span>
     </div>
+    <div id="stock-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px"></div>
 
     <!-- DIVIDEND PANEL -->
     <div class="panel" style="margin-bottom:12px">
@@ -715,6 +689,8 @@ async function fetchDividends(stocks) {
   }
 
   renderDivTable(rows);
+  // 股利資料抓到後，刷新個股卡片顯示殖利率與年化股利
+  renderStockCards(rows, true);
   if (statusEl) statusEl.textContent =
     cnt > 0 ? `${cnt}/${stocks.length} 檔・FinMind 即時` : '無對應股利資料';
 }
@@ -773,9 +749,9 @@ function render(data, isLive = false) {
   }));
 
   renderKpi(data.total, display.length);
+  renderStockCards(display, isLive);
   renderTable(display, isLive);
   renderCharts(display);
-  renderRanks(display);
 
   document.querySelectorAll('.kval').forEach(el => {
     el.classList.remove('nf');
@@ -840,65 +816,64 @@ function renderTable(stocks, isLive = false) {
 }
 
 // ── 獲利 / 虧損排行 ──────────────────────────────────────────
-function renderRanks(stocks) {
-  const card = (s, i, up) => `
-    <div class="ri">
-      <div class="rn">${i + 1}</div>
-      <div class="rinfo">
-        <div class="rname">${s.name}</div>
-        <div class="rcode">${s.code}</div>
+// ── 個股卡片 ──────────────────────────────────────────────────
+function renderStockCards(stocks, isLive) {
+  const container = document.getElementById('stock-cards');
+  container.innerHTML = stocks.map(s => {
+    const up    = s.pnl >= 0;
+    const color = up ? 'var(--green)' : 'var(--red)';
+    const topBg = up
+      ? 'linear-gradient(90deg,var(--green),transparent)'
+      : 'linear-gradient(90deg,var(--red),transparent)';
+
+    const priceStr  = s.price != null ? fl(s.price, 2) : '—';
+    const changeStr = s.change != null
+      ? `<span class="${s.change >= 0 ? 'cg' : 'cr'}">${s.change >= 0 ? '▲' : '▼'} ${Math.abs(s.change).toFixed(2)}%</span>`
+      : '<span style="color:var(--muted)">— %</span>';
+    const pnlStr = `${up ? '+' : '-'}NT$${f(Math.abs(s.pnl))}`;
+    const roiStr = `${s.roi >= 0 ? '+' : ''}${fl(s.roi)}%`;
+
+    // 股利（若已抓到才顯示）
+    const annDiv = s.annualDiv != null
+      ? `NT$${Math.round(s.annualDiv).toLocaleString('zh-TW')}`
+      : '<span style="color:var(--muted)">—</span>';
+    const yld = s.divYield != null
+      ? `<span style="color:#a78bfa">${s.divYield.toFixed(2)}%</span>`
+      : '<span style="color:var(--muted)">—</span>';
+
+    return `<div class="scard">
+      <div class="scard-top" style="background:${topBg}"></div>
+      <div class="scard-name">${s.name}</div>
+      <div class="scard-code">${s.code}</div>
+      <div class="scard-price" style="color:${color}">${priceStr}</div>
+      <div class="scard-change">${changeStr}</div>
+      <div class="scard-divider"></div>
+      <div class="scard-row">
+        <span class="scard-label">損益</span>
+        <span class="scard-val ${up ? 'cg' : 'cr'}">${pnlStr}</span>
       </div>
-      <div class="rval ${up ? 'cg' : 'cr'}">
-        ${pn(s.pnl)}<br>
-        <span style="font-size:9px;opacity:.7">${(s.roi >= 0 ? '+' : '') + fl(s.roi)}%</span>
+      <div class="scard-row">
+        <span class="scard-label">報酬率</span>
+        <span class="scard-val ${up ? 'cg' : 'cr'}">${roiStr}</span>
+      </div>
+      <div class="scard-divider"></div>
+      <div class="scard-row">
+        <span class="scard-label">年化股利</span>
+        <span class="scard-val">${annDiv}</span>
+      </div>
+      <div class="scard-row">
+        <span class="scard-label">殖利率</span>
+        <span class="scard-val">${yld}</span>
       </div>
     </div>`;
+  }).join('');
 
-  const empty = '<div style="font-family:var(--mono);font-size:11px;color:var(--muted);padding:6px 0">無</div>';
-
-  document.getElementById('rw').innerHTML =
-    [...stocks].filter(s => s.pnl > 0).sort((a,b) => b.pnl - a.pnl).slice(0,3)
-      .map((s,i) => card(s, i, true)).join('') || empty;
-
-  document.getElementById('rl').innerHTML =
-    [...stocks].filter(s => s.pnl < 0).sort((a,b) => a.pnl - b.pnl).slice(0,3)
-      .map((s,i) => card(s, i, false)).join('') || empty;
+  const updEl = document.getElementById('stocks-updated');
+  if (updEl) updEl.textContent = isLive ? '即時股價' : '試算表資料';
 }
-
-// ── 圖表 ────────────────────────────────────────────────────
 function renderCharts(stocks) {
   Object.values(charts).forEach(c => c && c.destroy());
   charts = {};
-
-  const go = { color: 'rgba(255,255,255,.45)', font: { family: 'JetBrains Mono', size: 10 } };
-  const gc = 'rgba(255,255,255,.045)';
-  const noLegend = { plugins: { legend: { display: false } } };
-
-  // 損益長條圖
-  const sorted = [...stocks].sort((a,b) => b.pnl - a.pnl);
-  document.getElementById('bar-badge').textContent =
-    stocks.filter(s => s.pnl > 0).length + '盈 / ' + stocks.filter(s => s.pnl < 0).length + '虧';
-
-  charts.bar = new Chart(document.getElementById('cBar'), {
-    type: 'bar',
-    data: {
-      labels: sorted.map(sn),
-      datasets: [{
-        data: sorted.map(s => +s.pnl.toFixed(0)),
-        backgroundColor: sorted.map(s => s.pnl >= 0 ? 'rgba(5,212,138,.62)' : 'rgba(255,79,109,.62)'),
-        borderRadius: 4, borderSkipped: false
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      ...noLegend,
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => 'NT$' + f(c.raw) + (c.raw >= 0 ? ' 獲利' : ' 虧損') } } },
-      scales: {
-        x: { ticks: { ...go, maxRotation: 28 }, grid: { color: gc } },
-        y: { ticks: { ...go, callback: v => 'NT$' + f(v) }, grid: { color: gc } }
-      }
-    }
-  });
 
   // 市值圓餅圖
   const mktTotal = stocks.reduce((a, s) => a + s.mktVal, 0);
@@ -924,48 +899,6 @@ function renderCharts(stocks) {
     options: {
       responsive: true, maintainAspectRatio: false, cutout: '70%',
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.label + ': NT$' + f(c.raw) } } }
-    }
-  });
-
-  // 報酬率橫條圖
-  const sortedRoi = [...stocks].sort((a,b) => b.roi - a.roi);
-  charts.roi = new Chart(document.getElementById('cRoi'), {
-    type: 'bar',
-    data: {
-      labels: sortedRoi.map(sn),
-      datasets: [{
-        data: sortedRoi.map(s => +fl(s.roi)),
-        backgroundColor: sortedRoi.map(s => s.roi >= 0 ? 'rgba(5,212,138,.58)' : 'rgba(255,79,109,.58)'),
-        borderRadius: 4, borderSkipped: false
-      }]
-    },
-    options: {
-      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => (c.raw >= 0 ? '+' : '') + c.raw.toFixed(2) + '%' } } },
-      scales: {
-        x: { ticks: { ...go, callback: v => v + '%' }, grid: { color: gc } },
-        y: { ticks: { ...go }, grid: { display: false } }
-      }
-    }
-  });
-
-  // 成本 vs 市值群組長條圖
-  charts.cmp = new Chart(document.getElementById('cCmp'), {
-    type: 'bar',
-    data: {
-      labels: stocks.map(sn),
-      datasets: [
-        { label: '成本', data: stocks.map(s => +s.cost.toFixed(0)),   backgroundColor: 'rgba(61,159,255,.52)', borderRadius: 4 },
-        { label: '市值', data: stocks.map(s => +s.mktVal.toFixed(0)), backgroundColor: 'rgba(5,212,138,.52)',  borderRadius: 4 }
-      ]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: true, labels: { color: 'rgba(255,255,255,.45)', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 10, padding: 12 } } },
-      scales: {
-        x: { ticks: { ...go, maxRotation: 28 }, grid: { color: gc } },
-        y: { ticks: { ...go, callback: v => 'NT$' + f(v) }, grid: { color: gc } }
-      }
     }
   });
 }
