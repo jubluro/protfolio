@@ -692,14 +692,18 @@ function renderDividends(stocks) {
 
   let tDiv = 0, tCost = 0, cnt = 0;
   stocks.forEach(s => {
-    tCost += s.cost;
-    if (s.annualDiv) { tDiv += s.annualDiv; cnt++; }
+    // 只計算有股利的股票的投資額
+    if (s.annualDiv && s.annualDiv > 0) {
+      tDiv  += s.annualDiv;
+      tCost += s.cost;
+      cnt++;
+    }
   });
 
   // 股利 KPI：以總投資額計算股利報酬率
   if (cnt > 0) {
     document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
-    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔）`;
+    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
     const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
     document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
   } else {
