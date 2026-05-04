@@ -517,16 +517,22 @@ function parseCSV(text) {
     }
     const s = {
       name,
-      code:      (r[1] || '').replace(/"/g,'').trim(),
-      buyPrice:  parseNum(r[2]),
-      shares:    parseNum(r[3]),
-      price:     parseNum(r[4]),
-      cost:      parseNum(r[5]),
-      mktVal:    parseNum(r[6]),
-      pnl:       parseNum(r[7]),
-      roi:       parseRoi(r[8]),
-      change:    r[9] != null && r[9] !== '' ? parseChangePct(r[9]) : null, // J欄：當日漲跌%
+      code:         (r[1] || '').replace(/"/g,'').trim(),
+      buyPrice:     parseNum(r[2]),
+      shares:       parseNum(r[3]),
+      price:        parseNum(r[4]),
+      cost:         parseNum(r[5]),
+      mktVal:       parseNum(r[6]),
+      pnl:          parseNum(r[7]),
+      roi:          parseRoi(r[8]),
+      change:       r[9] != null && r[9] !== '' ? parseChangePct(r[9]) : null,
+      divPerShare:  parseNum(r[10]), // K欄：每股股利
     };
+
+    // 計算年化股利和殖利率
+    s.annualDiv = s.divPerShare > 0 ? s.divPerShare * s.shares : null;
+    s.divYield  = s.divPerShare > 0 && s.buyPrice > 0
+      ? s.divPerShare / s.buyPrice * 100 : null;
     // 跳過完全空白的資料列
     if (s.cost === 0 && s.mktVal === 0 && s.buyPrice === 0 && !s.name) continue;
     stocks.push(s);
