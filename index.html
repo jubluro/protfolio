@@ -16,12 +16,12 @@
   --text:   #dde2ef;
   --muted:  #525c76;
   --muted2: #6e7a96;
-  --green:  #05d48a;
-  --green-a:rgba(5,212,138,.12);
-  --green-b:rgba(5,212,138,.22);
-  --red:    #ff4f6d;
-  --red-a:  rgba(255,79,109,.12);
-  --red-b:  rgba(255,79,109,.22);
+  --green:  #ff4f6d;
+  --green-a:rgba(255,79,109,.12);
+  --green-b:rgba(255,79,109,.22);
+  --red:    #05d48a;
+  --red-a:  rgba(5,212,138,.12);
+  --red-b:  rgba(5,212,138,.22);
   --gold:   #f0b429;
   --blue:   #3d9fff;
   --bebas:  'Bebas Neue', cursive;
@@ -883,10 +883,6 @@ function renderStockCards(stocks, isLive) {
       <div class="scard-row">
         <span class="scard-label">殖利率</span>
         <span class="scard-val">${yld}</span>
-      </div>
-      <div class="scard-row">
-        <span class="scard-label">股利報酬率</span>
-        <span class="scard-val" style="color:#a78bfa">${divRoi}</span>
       </div>
     </div>`;
   }).join('');
