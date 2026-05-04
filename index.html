@@ -341,9 +341,9 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
       </div>
       <div class="kpi">
         <div class="kacc" style="background:linear-gradient(90deg,#a78bfa,transparent)"></div>
-        <div class="klbl">平均殖利率</div>
+        <div class="klbl">股利報酬率</div>
         <div class="kval" id="k-divy" style="color:#a78bfa">—</div>
-        <div class="kfoot cm">依證交所資料</div>
+        <div class="kfoot cm">年化股利 ÷ 總投資額</div>
       </div>
     </div>
 
@@ -389,8 +389,7 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
               <th>殖利率</th>
               <th>每股股利 (元)</th>
               <th>預估年化股利</th>
-              <th>本益比</th>
-              <th>股價淨值比</th>
+              <th>股利報酬率</th>
             </tr>
           </thead>
           <tbody id="div-tbody"></tbody>
@@ -571,7 +570,7 @@ async function fetchData() {
 
     // ③ 再非同步撈即時股價與股利更新
     fetchLivePrices(data);
-    fetchDividends(data.stocks);
+    renderDividends(data.stocks);
 
   } catch (e) {
     showError(e.message);
@@ -683,92 +682,48 @@ async function fetchLivePrices(data) {
     ? `${updated}/${stocks.length} 檔即時股價・證交所`
     : '非交易時間，顯示昨收';
 
-  fetchDividends(stocks);
+  renderStockCards(stocks, updated > 0);
+  renderDividends(stocks);
 }
 
-// ── 股利資訊（FinMind API，上市+上櫃都有）──────────────────
-// 資料來源：finmindtrade.com - TaiwanStockPER（免費、無需 token）
-async function fetchDividends(stocks) {
+// ── 股利資訊（直接從 Google Sheets K欄讀取，不呼叫外部API）──
+function renderDividends(stocks) {
   const statusEl = document.getElementById('div-status');
-  if (statusEl) statusEl.textContent = '股利資料載入中...';
 
-  const today = new Date().toISOString().slice(0, 10);
-  let totalDiv = 0, totalCost = 0, matchCount = 0;
-
-  const rows = await Promise.all(stocks.map(async (s) => {
-    const code = s.code.trim().replace(/\.(TW|TWO)$/i, '');
-    if (!/^\d+$/.test(code)) {
-      // 美股不查
-      totalCost += s.cost;
-      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
-    }
-    try {
-      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${code}&start_date=${today}&end_date=${today}`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json();
-      const rec = j?.data?.[0]; // 當日最新一筆
-
-      if (!rec) {
-        // 若今日無資料（非交易日），改抓最近一筆
-        const urlRecent = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${code}&start_date=2025-01-01&end_date=${today}`;
-        const r2 = await fetch(urlRecent);
-        const j2 = await r2.json();
-        const data2 = j2?.data;
-        if (!data2 || !data2.length) throw new Error('no data');
-        const latest = data2[data2.length - 1];
-        return buildDivRow(s, latest, { totalDiv, totalCost, matchCount });
-      }
-      return buildDivRow(s, rec, { totalDiv, totalCost, matchCount });
-    } catch (_) {
-      totalCost += s.cost;
-      return { ...s, divYield: null, divPerShare: null, annualDiv: null, per: null, pbr: null };
-    }
-  }));
-
-  // 重新計算（Promise.all 裡無法直接累加外部變數，從 rows 計算）
   let tDiv = 0, tCost = 0, cnt = 0;
-  rows.forEach(s => {
+  stocks.forEach(s => {
     tCost += s.cost;
     if (s.annualDiv) { tDiv += s.annualDiv; cnt++; }
   });
 
+  // 股利 KPI：以總投資額計算股利報酬率
   if (cnt > 0) {
     document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
     document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔）`;
-    const avgYield = tCost > 0 ? tDiv / tCost * 100 : 0;
-    document.getElementById('k-divy').textContent = avgYield.toFixed(2) + '%';
+    const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
+    document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
   } else {
     document.getElementById('k-divamt').textContent = '—';
     document.getElementById('k-divamt-sub').textContent = '無股利資料';
     document.getElementById('k-divy').textContent = '—';
   }
 
-  renderDivTable(rows);
-  // 股利資料抓到後，刷新個股卡片顯示殖利率與年化股利
-  renderStockCards(rows, true);
-  if (statusEl) statusEl.textContent =
-    cnt > 0 ? `${cnt}/${stocks.length} 檔・FinMind 即時` : '無對應股利資料';
+  renderDivTable(stocks);
+  if (statusEl) statusEl.textContent = cnt > 0
+    ? `${cnt}/${stocks.length} 檔有股利・Google Sheets`
+    : '無股利資料';
 }
 
-function buildDivRow(s, rec, _) {
-  const divYield    = parseFloat(rec.dividend_yield) || null; // 殖利率 %
-  const per         = parseFloat(rec.PER)            || null;
-  const pbr         = parseFloat(rec.PBR)            || null;
-  const usePrice    = s.livePrice || s.price || s.buyPrice;
-  const divPerShare = (divYield && usePrice)
-    ? parseFloat((divYield / 100 * usePrice).toFixed(2)) : null;
-  const annualDiv   = divPerShare ? divPerShare * s.shares : null;
-  return { ...s, divYield, divPerShare, annualDiv, per, pbr };
-}
-
-function renderDivTable(rows) {
-  document.getElementById('div-tbody').innerHTML = rows.map(s => {
-    const yld = s.divYield != null ? `<span style="color:#a78bfa;font-weight:500">${s.divYield.toFixed(2)}%</span>` : '<span style="color:var(--muted)">—</span>';
-    const dps = s.divPerShare != null ? s.divPerShare.toFixed(2) + ' 元' : '—';
-    const ann = s.annualDiv   != null ? 'NT$' + Math.round(s.annualDiv).toLocaleString('zh-TW') : '—';
-    const per = s.per  != null ? s.per.toFixed(1) + ' 倍' : '—';
-    const pbr = s.pbr  != null ? s.pbr.toFixed(2) + ' 倍' : '—';
+function renderDivTable(stocks) {
+  document.getElementById('div-tbody').innerHTML = stocks.map(s => {
+    const yld    = s.divYield != null
+      ? `<span style="color:#a78bfa;font-weight:500">${s.divYield.toFixed(2)}%</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    const dps    = s.divPerShare > 0 ? s.divPerShare.toFixed(2) + ' 元' : '—';
+    const ann    = s.annualDiv  != null ? 'NT$' + Math.round(s.annualDiv).toLocaleString('zh-TW') : '—';
+    const divRoi = s.annualDiv != null && s.cost > 0
+      ? `<span style="color:#a78bfa;font-weight:500">${(s.annualDiv / s.cost * 100).toFixed(2)}%</span>`
+      : '<span style="color:var(--muted)">—</span>';
     return `<tr>
       <td>${s.name}</td>
       <td style="color:var(--muted2);font-size:11px">${s.code}</td>
@@ -776,8 +731,7 @@ function renderDivTable(rows) {
       <td>${yld}</td>
       <td style="color:#a78bfa">${dps}</td>
       <td style="color:#a78bfa;font-weight:500">${ann}</td>
-      <td style="color:var(--muted2)">${per}</td>
-      <td style="color:var(--muted2)">${pbr}</td>
+      <td>${divRoi}</td>
     </tr>`;
   }).join('');
 }
@@ -897,6 +851,11 @@ function renderStockCards(stocks, isLive) {
       ? `<span style="color:#a78bfa">${s.divYield.toFixed(2)}%</span>`
       : '<span style="color:var(--muted)">—</span>';
 
+    // 股利報酬率 = 年化股利 ÷ 總投資額
+    const divRoi = s.annualDiv != null && s.cost > 0
+      ? (s.annualDiv / s.cost * 100).toFixed(2) + '%'
+      : '—';
+
     return `<div class="scard">
       <div class="scard-top" style="background:${topBg}"></div>
       <div class="scard-name">${s.name}</div>
@@ -920,6 +879,10 @@ function renderStockCards(stocks, isLive) {
       <div class="scard-row">
         <span class="scard-label">殖利率</span>
         <span class="scard-val">${yld}</span>
+      </div>
+      <div class="scard-row">
+        <span class="scard-label">股利報酬率</span>
+        <span class="scard-val" style="color:#a78bfa">${divRoi}</span>
       </div>
     </div>`;
   }).join('');
