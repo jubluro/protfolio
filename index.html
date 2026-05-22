@@ -570,7 +570,7 @@ async function fetchData() {
 
     // ③ 再非同步撈即時股價與股利更新
     fetchLivePrices(data);
-    renderDividends(data.stocks);
+    fetchDividends(data.stocks);
 
   } catch (e) {
     showError(e.message);
@@ -683,16 +683,49 @@ async function fetchLivePrices(data) {
     : '非交易時間，顯示昨收';
 
   renderStockCards(stocks, updated > 0);
-  renderDividends(stocks);
+  fetchDividends(stocks);
 }
 
-// ── 股利資訊（直接從 Google Sheets K欄讀取，不呼叫外部API）──
-function renderDividends(stocks) {
+// ── 股利資訊（玩股網即時撈取）──────────────────────────────
+async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
+  if (statusEl) statusEl.textContent = '股利資料載入中...';
 
+  const PROXY = 'https://corsproxy.io/?url=';
+
+  await Promise.all(stocks.map(async (s) => {
+    const code = s.code.replace(/\.(TW|TWO)$/i, '');
+    if (!/^\d+$/.test(code)) return; // 跳過非台股
+    try {
+      const url = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend`;
+      const r = await fetch(PROXY + encodeURIComponent(url));
+      if (!r.ok) return;
+      const html = await r.text();
+
+      // 從 HTML 找最新一年的現金股利
+      // 玩股網表格：年度 | 除息日 | 股票股利 | 現金股利 | ...
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const rows = doc.querySelectorAll('table tbody tr');
+
+      for (const row of rows) {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 4) continue;
+        const cashDiv = parseFloat(cells[3]?.textContent?.trim());
+        if (!isNaN(cashDiv) && cashDiv >= 0) {
+          s.divPerShare = cashDiv;
+          s.annualDiv   = cashDiv > 0 ? cashDiv * s.shares : null;
+          s.divYield    = cashDiv > 0 && s.buyPrice > 0
+            ? cashDiv / s.buyPrice * 100 : null;
+          break; // 只取最新一筆
+        }
+      }
+    } catch (_) {}
+  }));
+
+  // 計算 KPI
   let tDiv = 0, tCost = 0, cnt = 0;
   stocks.forEach(s => {
-    // 只計算有股利的股票的投資額
     if (s.annualDiv && s.annualDiv > 0) {
       tDiv  += s.annualDiv;
       tCost += s.cost;
@@ -700,7 +733,6 @@ function renderDividends(stocks) {
     }
   });
 
-  // 股利 KPI：以總投資額計算股利報酬率
   if (cnt > 0) {
     document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
     document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
@@ -713,8 +745,9 @@ function renderDividends(stocks) {
   }
 
   renderDivTable(stocks);
+  renderStockCards(stocks, true);
   if (statusEl) statusEl.textContent = cnt > 0
-    ? `${cnt}/${stocks.length} 檔有股利・Google Sheets`
+    ? `${cnt}/${stocks.length} 檔有股利・玩股網`
     : '無股利資料';
 }
 
