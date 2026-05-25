@@ -566,9 +566,12 @@ async function fetchData() {
     // ② 先用 Google Sheets 資料渲染，讓畫面立即顯示
     render(data);
 
-    // ③ 再非同步撈即時股價與股利更新
-    fetchLivePrices(data);
+    // ③ 立即開始抓股利（不等股價）
+    console.log('即將呼叫 fetchDividends, stocks:', data.stocks.length);
     fetchDividends(data.stocks);
+
+    // ④ 同時抓即時股價
+    fetchLivePrices(data);
 
   } catch (e) {
     showError(e.message);
