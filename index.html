@@ -688,37 +688,40 @@ async function fetchLivePrices(data) {
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
+  console.log('=== fetchDividends 開始，股票數:', stocks.length, '===');
 
-  const PROXY = 'https://corsproxy.io/?url=';
+  const PROXY = 'https://api.allorigins.win/raw?url=';
 
   await Promise.all(stocks.map(async (s) => {
     const code = s.code.replace(/\.(TW|TWO)$/i, '');
-    if (!/^\d+$/.test(code)) return; // 跳過非台股
+    if (!/^\d+$/.test(code)) return;
+    console.log(code + ' 開始抓取...');
     try {
       const url = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend`;
       const r = await fetch(PROXY + encodeURIComponent(url));
+      console.log(code + ' 回應狀態:', r.status);
       if (!r.ok) return;
       const html = await r.text();
+      console.log(code + ' HTML長度:', html.length, '前300字:', html.substring(0, 300));
 
-      // 從 HTML 找最新一年的現金股利
-      // 玩股網表格：年度 | 除息日 | 股票股利 | 現金股利 | ...
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
       const rows = doc.querySelectorAll('table tbody tr');
+      console.log(code + ' table rows:', rows.length);
 
       for (const row of rows) {
         const cells = row.querySelectorAll('td');
         if (cells.length < 4) continue;
         const cashDiv = parseFloat(cells[3]?.textContent?.trim());
+        console.log(code + ' cells:', Array.from(cells).map(c=>c.textContent.trim()), 'cashDiv:', cashDiv);
         if (!isNaN(cashDiv) && cashDiv >= 0) {
           s.divPerShare = cashDiv;
           s.annualDiv   = cashDiv > 0 ? cashDiv * s.shares : null;
-          s.divYield    = cashDiv > 0 && s.buyPrice > 0
-            ? cashDiv / s.buyPrice * 100 : null;
-          break; // 只取最新一筆
+          s.divYield    = cashDiv > 0 && s.buyPrice > 0 ? cashDiv / s.buyPrice * 100 : null;
+          break;
         }
       }
-    } catch (_) {}
+    } catch(e) { console.log(code + ' 錯誤:', e.message); }
   }));
 
   // 計算 KPI
