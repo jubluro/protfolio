@@ -429,7 +429,7 @@ td:nth-child(2) { text-align: left; color: var(--muted2); font-size: 11px; }
 
 <script>
 // ── 設定：Google Sheets 發佈 CSV 連結 ────────────────────────
-const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTp7v4CsKawwWAwO-YDXx7gldUwDN5VyT-RteKqrvT7iCjEUCg-EXILeQ2hfcVcq969zEO23gbnn6dA/pub?gid=0&single=true&output=csv&range=A:J&cb=';
+const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTp7v4CsKawwWAwO-YDXx7gldUwDN5VyT-RteKqrvT7iCjEUCg-EXILeQ2hfcVcq969zEO23gbnn6dA/pub?gid=0&single=true&output=csv&cb=';
 
 // ── 調色盤 ──────────────────────────────────────────────────
 const PAL = ['#05d48a','#3d9fff','#f0b429','#ff4f6d','#9f7aea',
@@ -525,11 +525,13 @@ function parseCSV(text) {
       pnl:          parseNum(r[7]),
       roi:          parseRoi(r[8]),
       change:       r[9] != null && r[9] !== '' ? parseChangePct(r[9]) : null,
-      // 股利資料不從 Sheets 讀，由玩股網 fetchDividends 填入
-      divPerShare:  null,
-      annualDiv:    null,
-      divYield:     null,
+      divPerShare:  parseNum(r[10]), // K欄：每股股利
     };
+
+    // 計算年化股利和殖利率
+    s.annualDiv = s.divPerShare > 0 ? s.divPerShare * s.shares : null;
+    s.divYield  = s.divPerShare > 0 && s.buyPrice > 0
+      ? s.divPerShare / s.buyPrice * 100 : null;
     // 跳過完全空白的資料列
     if (s.cost === 0 && s.mktVal === 0 && s.buyPrice === 0 && !s.name) continue;
     stocks.push(s);
@@ -555,19 +557,20 @@ async function fetchData() {
   btn.classList.add('sp');
 
   try {
+    // ① 先從 Google Sheets 抓持股基本資料
     const res  = await fetch(CSV_URL + Date.now());
     if (!res.ok) throw new Error(`HTTP ${res.status} — 請確認 Google Sheets 已發佈至網路`);
     const text = await res.text();
-    if (!text || text.length < 10) throw new Error('回傳資料為空');
+    if (!text || text.length < 10) throw new Error('回傳資料為空，請確認試算表有資料');
     const data = parseCSV(text);
-    if (!data) throw new Error('解析失敗 — 請確認資料格式正確');
+    if (!data) throw new Error('解析失敗 — 請確認資料從第2行開始，且至少有股票名稱、總投資額、市值欄位');
 
+    // ② 先用 Google Sheets 資料渲染，讓畫面立即顯示
     render(data);
-    console.log('即將呼叫 fetchDividends, stocks:', data.stocks.length);
-    fetchDividends(data.stocks);
 
-    document.getElementById('updAt').textContent =
-      new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    // ③ 再非同步撈即時股價與股利更新
+    fetchLivePrices(data);
+    renderDividends(data.stocks);
 
   } catch (e) {
     showError(e.message);
@@ -576,49 +579,120 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（玩股網即時撈取）──────────────────────────────
-async function fetchDividends(stocks) {
-  const statusEl = document.getElementById('div-status');
-  if (statusEl) statusEl.textContent = '股利資料載入中...';
-  console.log('=== fetchDividends 開始，股票數:', stocks.length, '===');
+// ── 股票代號轉換（上市.TW / 上櫃.TWO）──────────────────────
+// 上櫃常見代號：4碼數字開頭為 4xxx、6xxx、8xxx、00xxx (ETF) 等
+// 最可靠方式：先試 .TW，若失敗再試 .TWO
+// ── 即時股價（台灣證交所 mis API，上市+上櫃一次查全部）─────
+async function fetchLivePrices(data) {
+  const priceEl = document.getElementById('price-status');
+  if (priceEl) priceEl.textContent = '股價更新中...';
+  const stocks = data.stocks;
+  const twStocks = stocks.filter(s => /^\d+$/.test(s.code.replace(/\.(TW|TWO)$/i, '')));
+  if (!twStocks.length) { if(priceEl) priceEl.textContent = '無台股'; return; }
 
-  const PROXY = 'https://api.allorigins.win/raw?url=';
+  // 先用 tse_ 查所有股票，失敗的改用 otc_ 補查
+  const buildUrl = (list) =>
+    `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(list.join('|'))}&json=1&delay=0&_=${Date.now()}`;
 
-  await Promise.all(stocks.map(async (s) => {
-    const code = s.code.replace(/\.(TW|TWO)$/i, '');
-    if (!/^\d+$/.test(code)) return;
-    console.log(code + ' 開始抓取...');
+  const parseMis = async (codes, prefix) => {
     try {
-      const url = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend`;
-      const r = await fetch(PROXY + encodeURIComponent(url));
-      console.log(code + ' 回應狀態:', r.status);
-      if (!r.ok) return;
-      const html = await r.text();
-      console.log(code + ' HTML長度:', html.length, '前300字:', html.substring(0, 300));
+      const exList = codes.map(c => `${prefix}_${c}.tw`);
+      const r = await fetch(buildUrl(exList));
+      const j = await r.json();
+      return j?.msgArray || [];
+    } catch(_) { return []; }
+  };
 
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-      const rows = doc.querySelectorAll('table tbody tr');
-      console.log(code + ' table rows:', rows.length);
+  const codes = twStocks.map(s => s.code.replace(/\.(TW|TWO)$/i, ''));
 
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 4) continue;
-        const cashDiv = parseFloat(cells[3]?.textContent?.trim());
-        console.log(code + ' cells:', Array.from(cells).map(c=>c.textContent.trim()), 'cashDiv:', cashDiv);
-        if (!isNaN(cashDiv) && cashDiv >= 0) {
-          s.divPerShare = cashDiv;
-          s.annualDiv   = cashDiv > 0 ? cashDiv * s.shares : null;
-          s.divYield    = cashDiv > 0 && s.buyPrice > 0 ? cashDiv / s.buyPrice * 100 : null;
-          break;
+  // 先全部以 tse_ 查
+  const tseRes = await parseMis(codes, 'tse');
+  const tseMap = {}; tseRes.forEach(d => { tseMap[d.c] = d; });
+
+  // 找出沒抓到或成交價是 '-' 的（上櫃），改用 otc_ 補查
+  const otcCodes = codes.filter(c => !tseMap[c] || tseMap[c].z === '-');
+  const otcMap = {};
+  if (otcCodes.length) {
+    const otcRes = await parseMis(otcCodes, 'otc');
+    otcRes.forEach(d => { otcMap[d.c] = d; });
+  }
+
+  let updated = 0;
+  twStocks.forEach(s => {
+    const code = s.code.replace(/\.(TW|TWO)$/i, '');
+    const d = tseMap[code]?.z !== '-' ? tseMap[code] : otcMap[code];
+    if (!d) return;
+    const price = parseFloat(d.z !== '-' ? d.z : d.y) || null;
+    const prev  = parseFloat(d.y) || null;
+    if (!price) return;
+    s.livePrice  = price;
+    s.liveChange = prev ? (price - prev) / prev * 100 : 0;
+    s.liveMktVal = price * s.shares;
+    s.livePnl    = s.liveMktVal - s.cost;
+    s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
+    updated++;
+  });
+
+  // 對仍沒有即時資料的股票，從 HiStock 補抓（透過 CORS proxy）
+  const missing = twStocks.filter(s => s.livePrice == null);
+  if (missing.length) {
+    await Promise.all(missing.map(async s => {
+      const code = s.code.replace(/\.(TW|TWO)$/i, '');
+      try {
+        const PROXY = 'https://corsproxy.io/?';
+        const url = `https://histock.tw/stock/${code}`;
+        const r = await fetch(PROXY + encodeURIComponent(url));
+        const html = await r.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        // HiStock 現價
+        const priceEl2 = doc.querySelector('#Price1_lbTPrice');
+        const price = priceEl2 ? parseFloat(priceEl2.textContent.trim()) : null;
+
+        // HiStock 漲跌幅
+        const changeEl = doc.querySelector('#Price1_lbTodayChooseRate');
+        let change = null;
+        if (changeEl) {
+          const txt = changeEl.textContent.replace('%','').trim();
+          change = parseFloat(txt) || null;
         }
-      }
-    } catch(e) { console.log(code + ' 錯誤:', e.message); }
-  }));
 
-  // 計算 KPI
+        if (!price) return;
+        s.livePrice  = price;
+        s.liveChange = change;
+        s.liveMktVal = price * s.shares;
+        s.livePnl    = s.liveMktVal - s.cost;
+        s.liveRoi    = s.cost ? s.livePnl / s.cost * 100 : 0;
+        updated++;
+      } catch(_) {}
+    }));
+  }
+
+  // 重新計算總覽
+  const tc = stocks.reduce((a, s) => a + s.cost, 0);
+  const tv = stocks.reduce((a, s) => a + (s.liveMktVal ?? s.mktVal), 0);
+  data.total = { cost: tc, val: tv, pnl: tv - tc, roi: tc ? (tv - tc) / tc * 100 : 0 };
+
+  render(data, true);
+  const now = new Date();
+  document.getElementById('updAt').textContent =
+    now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' 即時';
+  if (priceEl) priceEl.textContent = updated > 0
+    ? `${updated}/${stocks.length} 檔即時股價・證交所`
+    : '非交易時間，顯示昨收';
+
+  renderStockCards(stocks, updated > 0);
+  renderDividends(stocks);
+}
+
+// ── 股利資訊（直接從 Google Sheets K欄讀取，不呼叫外部API）──
+function renderDividends(stocks) {
+  const statusEl = document.getElementById('div-status');
+
   let tDiv = 0, tCost = 0, cnt = 0;
   stocks.forEach(s => {
+    // 只計算有股利的股票的投資額
     if (s.annualDiv && s.annualDiv > 0) {
       tDiv  += s.annualDiv;
       tCost += s.cost;
@@ -626,6 +700,7 @@ async function fetchDividends(stocks) {
     }
   });
 
+  // 股利 KPI：以總投資額計算股利報酬率
   if (cnt > 0) {
     document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
     document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
@@ -638,9 +713,8 @@ async function fetchDividends(stocks) {
   }
 
   renderDivTable(stocks);
-  renderStockCards(stocks);
   if (statusEl) statusEl.textContent = cnt > 0
-    ? `${cnt}/${stocks.length} 檔有股利・玩股網`
+    ? `${cnt}/${stocks.length} 檔有股利・Google Sheets`
     : '無股利資料';
 }
 
@@ -673,15 +747,25 @@ function showError(msg) {
 }
 
 // ── 主渲染入口 ───────────────────────────────────────────────
-function render(data) {
+function render(data, isLive = false) {
   document.getElementById('loading').classList.add('hide');
   document.getElementById('error-box').style.display = 'none';
   document.getElementById('app').style.display = 'block';
 
-  renderKpi(data.total, data.stocks.length);
-  renderStockCards(data.stocks);
-  renderTable(data.stocks);
-  renderCharts(data.stocks);
+  // 若有即時股價，把每股的顯示數據替換掉
+  const display = data.stocks.map(s => ({
+    ...s,
+    price:  isLive && s.livePrice  != null ? s.livePrice  : s.price,
+    mktVal: isLive && s.liveMktVal != null ? s.liveMktVal : s.mktVal,
+    pnl:    isLive && s.livePnl    != null ? s.livePnl    : s.pnl,
+    roi:    isLive && s.liveRoi    != null ? s.liveRoi    : s.roi,
+    change: isLive && s.liveChange != null ? s.liveChange : s.change,
+  }));
+
+  renderKpi(data.total, display.length);
+  renderStockCards(display, isLive);
+  renderTable(display, isLive);
+  renderCharts(display);
 
   document.querySelectorAll('.kval').forEach(el => {
     el.classList.remove('nf');
@@ -722,12 +806,12 @@ function renderKpi(t, cnt) {
 }
 
 // ── 持股明細表 ───────────────────────────────────────────────
-function renderTable(stocks) {
+function renderTable(stocks, isLive = false) {
   document.getElementById('tbl-cnt').textContent = stocks.length + ' 筆';
   document.getElementById('tbody').innerHTML = stocks.map(s => {
     const up  = s.pnl >= 0;
     const chg = s.change;
-    const chgCell = chg != null
+    const chgCell = isLive && chg != null
       ? `<td class="${chg >= 0 ? 'cg' : 'cr'}">${(chg >= 0 ? '+' : '') + fl(chg)}%</td>`
       : `<td class="cm">—</td>`;
     return `<tr>
@@ -747,7 +831,7 @@ function renderTable(stocks) {
 
 // ── 獲利 / 虧損排行 ──────────────────────────────────────────
 // ── 個股卡片 ──────────────────────────────────────────────────
-function renderStockCards(stocks) {
+function renderStockCards(stocks, isLive) {
   const container = document.getElementById('stock-cards');
   container.innerHTML = stocks.map(s => {
     const up    = s.pnl >= 0;
