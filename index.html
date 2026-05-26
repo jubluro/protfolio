@@ -579,74 +579,42 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（玩股網 meta-description 解析）────────────────
+// ── 股利資訊（透過 Cloudflare Worker 抓玩股網）─────────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
+
+  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
 
   await Promise.all(stocks.map(async (s) => {
     const code = s.code.replace(/\.(TW|TWO)$/i, '');
     if (!/^\d+$/.test(code)) return;
     try {
-      // 從 profitability/dividend-payout-ratio 頁面抓 meta-description
-      // 格式：「鴻海(2317)最新XXXX現金股利發放率XX%...」
-      // 另外也試 enterprise-value/dividend-yield 頁面
-      // 格式：「鴻海(2317) 2006年現金殖利率1.36%」
-      // 最直接：從 all-close-info 相關 API 抓
-
-      // 試 dividend-payout-ratio 頁面（有靜態 HTML）
-      const url = `https://www.wantgoo.com/stock/${code}/profitability/dividend-payout-ratio`;
-      const r = await fetch(url, { headers: { 'Accept': 'text/html' } });
-      if (!r.ok) return;
+      const url = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend`;
+      const r = await fetch(PROXY + encodeURIComponent(url));
+      if (!r.ok) { console.log(code + ' proxy 失敗:', r.status); return; }
       const html = await r.text();
+      console.log(code + ' HTML長度:', html.length);
 
-      // 從 meta description 解析現金股利
-      // 格式：「最新YYYY現金股利XX元」或從殖利率頁面抓
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
 
-      // 先找 meta description
-      const meta = doc.querySelector('meta[name="description"]') ||
-                   doc.querySelector('meta[property="og:description"]');
-      const desc = meta?.getAttribute('content') || '';
-      console.log(code + ' meta desc:', desc);
+      // 找股利表格
+      const rows = doc.querySelectorAll('table tbody tr');
+      console.log(code + ' table rows:', rows.length);
 
-      // 解析現金股利數字（從描述文字中找數字）
-      // 再試從 all-close-info 表找殖利率
-      let divYield = null;
-
-      // 試解析 meta description 中的殖利率
-      const yieldMatch = desc.match(/現金殖利率(\d+\.?\d*)%/);
-      if (yieldMatch) {
-        divYield = parseFloat(yieldMatch[1]);
-        const usePrice = s.price || s.buyPrice;
-        if (divYield && usePrice) {
-          s.divPerShare = parseFloat((divYield / 100 * usePrice).toFixed(2));
-          s.annualDiv   = s.divPerShare * s.shares;
-          s.divYield    = divYield;
-        }
-        return;
-      }
-
-      // 試 dividend-yield 頁面
-      const url2 = `https://www.wantgoo.com/stock/${code}/enterprise-value/dividend-yield`;
-      const r2 = await fetch(url2, { headers: { 'Accept': 'text/html' } });
-      if (!r2.ok) return;
-      const html2 = await r2.text();
-      const doc2 = parser.parseFromString(html2, 'text/html');
-      const meta2 = doc2.querySelector('meta[name="description"]') ||
-                    doc2.querySelector('meta[property="og:description"]');
-      const desc2 = meta2?.getAttribute('content') || '';
-      console.log(code + ' meta desc2:', desc2);
-
-      const yieldMatch2 = desc2.match(/現金殖利率(\d+\.?\d*)%/);
-      if (yieldMatch2) {
-        divYield = parseFloat(yieldMatch2[1]);
-        const usePrice = s.price || s.buyPrice;
-        if (divYield && usePrice) {
-          s.divPerShare = parseFloat((divYield / 100 * usePrice).toFixed(2));
-          s.annualDiv   = s.divPerShare * s.shares;
-          s.divYield    = divYield;
+      for (const row of rows) {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 4) continue;
+        const allCells = Array.from(cells).map(c => c.textContent.trim());
+        console.log(code + ' cells:', allCells);
+        const cashDiv = parseFloat(cells[3]?.textContent?.trim());
+        if (!isNaN(cashDiv) && cashDiv > 0) {
+          s.divPerShare = cashDiv;
+          s.annualDiv   = cashDiv * s.shares;
+          s.divYield    = s.buyPrice > 0 ? cashDiv / s.buyPrice * 100 : null;
+          console.log(code + ' 股利:', cashDiv);
+          break;
         }
       }
     } catch(e) { console.log(code + ' 錯誤:', e.message); }
