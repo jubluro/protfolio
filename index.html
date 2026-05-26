@@ -579,72 +579,60 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（透過 Cloudflare Worker 抓玩股網）─────────────
+// ── 股利資訊（透過 Cloudflare Worker 抓玩股網 JSON API）──────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
   const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
 
-  await Promise.all(stocks.map(async (s) => {
-    const code = s.code.replace(/\.(TW|TWO)$/i, '');
-    if (!/^\d+$/.test(code)) return;
+  // 先從一檔股票的頁面找 API endpoint
+  async function findApiEndpoint(code) {
     try {
       const url = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend`;
       const r = await fetch(PROXY + encodeURIComponent(url));
-      if (!r.ok) { console.log(code + ' proxy 失敗:', r.status); return; }
       const html = await r.text();
-      console.log(code + ' HTML長度:', html.length);
-
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-
-      // 找股利表格
-      const rows = doc.querySelectorAll('table tbody tr');
-      console.log(code + ' table rows:', rows.length);
-
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 4) continue;
-        const allCells = Array.from(cells).map(c => c.textContent.trim());
-        console.log(code + ' cells:', allCells);
-        const cashDiv = parseFloat(cells[3]?.textContent?.trim());
-        if (!isNaN(cashDiv) && cashDiv > 0) {
-          s.divPerShare = cashDiv;
-          s.annualDiv   = cashDiv * s.shares;
-          s.divYield    = s.buyPrice > 0 ? cashDiv / s.buyPrice * 100 : null;
-          console.log(code + ' 股利:', cashDiv);
-          break;
-        }
-      }
-    } catch(e) { console.log(code + ' 錯誤:', e.message); }
-  }));
-
-  let tDiv = 0, tCost = 0, cnt = 0;
-  stocks.forEach(s => {
-    if (s.annualDiv && s.annualDiv > 0) {
-      tDiv  += s.annualDiv;
-      tCost += s.cost;
-      cnt++;
-    }
-  });
-
-  if (cnt > 0) {
-    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
-    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
-    const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
-    document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
-  } else {
-    document.getElementById('k-divamt').textContent = '—';
-    document.getElementById('k-divamt-sub').textContent = '無股利資料';
-    document.getElementById('k-divy').textContent = '—';
+      // 找 JS bundle 網址
+      const jsMatches = html.match(/src="(\/[^"]*\.js[^"]*)"/g) || [];
+      console.log('JS files:', jsMatches.slice(0, 5));
+      // 找 API 相關字串
+      const apiMatches = html.match(/["'](\/api\/[^"']*dividend[^"']*)["']/gi) || [];
+      const apiMatches2 = html.match(/["'](\/WantGoo[^"']*dividend[^"']*)["']/gi) || [];
+      const apiMatches3 = html.match(/fetch\(["'`]([^"'`]*dividend[^"'`]*)["'`]/gi) || [];
+      console.log('API matches:', [...apiMatches, ...apiMatches2, ...apiMatches3]);
+      return html;
+    } catch(e) { console.log('findApi 錯誤:', e.message); return ''; }
   }
 
-  renderDivTable(stocks);
-  renderStockCards(stocks);
-  if (statusEl) statusEl.textContent = cnt > 0
-    ? `${cnt}/${stocks.length} 檔有股利・玩股網`
-    : '無股利資料';
+  // 先探索 API endpoint
+  const html = await findApiEndpoint('2317');
+
+  // 嘗試常見的玩股網 API 格式
+  const apiCandidates = [
+    'https://www.wantgoo.com/api/v1/stock/CODE/dividend',
+    'https://www.wantgoo.com/api/stock/CODE/dividend-policy',
+    'https://www.wantgoo.com/WantGooStockInfo/api/stock/CODE/dividend',
+    'https://www.wantgoo.com/api/dividend/CODE',
+    'https://www.wantgoo.com/api/v1/dividend/CODE',
+  ];
+
+  // 測試第一個 API endpoint
+  let workingApi = null;
+  for (const api of apiCandidates) {
+    try {
+      const testUrl = api.replace('CODE', '2317');
+      const r = await fetch(PROXY + encodeURIComponent(testUrl));
+      const text = await r.text();
+      console.log('測試 API:', testUrl, '狀態:', r.status, '回傳前100字:', text.substring(0, 100));
+      if (r.ok && text.includes('dividend')) {
+        workingApi = api;
+        break;
+      }
+    } catch(e) {}
+  }
+
+  console.log('有效 API:', workingApi);
+  if (statusEl) statusEl.textContent = workingApi ? '找到 API！' : '尋找 API 中...';
 }
 
 function renderDivTable(stocks) {
