@@ -579,28 +579,71 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（透過 Cloudflare Worker 找玩股網真實 API）──────
+// ── 股利資訊（玩股網 JSON API via Cloudflare Worker）─────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
   const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
 
-  try {
-    // 直接抓股利 JS 檔案，找 API endpoint
-    const jsUrl = 'https://www.wantgoo.com/js/stock/dividend-policy/ex-dividend.min.js';
-    const jsR = await fetch(PROXY + encodeURIComponent(jsUrl) + '&v=' + Date.now());
-    const jsText = await jsR.text();
-    console.log('JS 大小:', jsText.length);
-    console.log('JS 全文:', jsText);
-  } catch(e) {
-    console.log('錯誤:', e.message);
+  await Promise.all(stocks.map(async (s) => {
+    const code = s.code.replace(/\.(TW|TWO)$/i, '');
+    if (!/^\d+$/.test(code)) return;
+    try {
+      const apiUrl = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend-data`;
+      const r = await fetch(PROXY + encodeURIComponent(apiUrl));
+      if (!r.ok) { console.log(code + ' 失敗:', r.status); return; }
+      const data = await r.json();
+      console.log(code + ' 股利資料:', data);
+
+      if (!data || !data.length) return;
+
+      // 取最新年度的現金股利加總
+      const latestYear = Math.max(...data.map(d => parseInt(d.year)));
+      const yearData = data.filter(d => parseInt(d.year) === latestYear);
+      const totalCash = yearData
+        .map(d => d.cashDividend === '--' ? 0 : parseFloat(d.cashDividend) || 0)
+        .reduce((a, b) => a + b, 0);
+
+      console.log(code + ' 最新年度:', latestYear, '年度現金股利:', totalCash);
+
+      if (totalCash > 0) {
+        s.divPerShare = parseFloat(totalCash.toFixed(3));
+        s.annualDiv   = s.divPerShare * s.shares;
+        s.divYield    = s.buyPrice > 0 ? s.divPerShare / s.buyPrice * 100 : null;
+      }
+    } catch(e) { console.log(code + ' 錯誤:', e.message); }
+  }));
+
+  // KPI 計算（只算有股利的股票）
+  let tDiv = 0, tCost = 0, cnt = 0;
+  stocks.forEach(s => {
+    if (s.annualDiv && s.annualDiv > 0) {
+      tDiv  += s.annualDiv;
+      tCost += s.cost;
+      cnt++;
+    }
+  });
+
+  if (cnt > 0) {
+    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
+    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
+    const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
+    document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
+  } else {
+    document.getElementById('k-divamt').textContent = '—';
+    document.getElementById('k-divamt-sub').textContent = '無股利資料';
+    document.getElementById('k-divy').textContent = '—';
   }
 
-  if (statusEl) statusEl.textContent = '請看 Console';
+  renderDivTable(stocks);
+  renderStockCards(stocks);
+  if (statusEl) statusEl.textContent = cnt > 0
+    ? `${cnt}/${stocks.length} 檔有股利・玩股網`
+    : '無股利資料';
 }
 
-function renderDivTable(stocks) {
+
   document.getElementById('div-tbody').innerHTML = stocks.map(s => {
     const yld    = s.divYield != null
       ? `<span style="color:#a78bfa;font-weight:500">${s.divYield.toFixed(2)}%</span>`
