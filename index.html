@@ -579,7 +579,7 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（玩股網 JSON API via Cloudflare Worker）─────────
+// ── 股利資訊（玩股網 enterprise-value/dividend-yield meta 解析）─
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
@@ -590,27 +590,38 @@ async function fetchDividends(stocks) {
     const code = s.code.replace(/\.(TW|TWO)$/i, '');
     if (!/^\d+$/.test(code)) return;
     try {
-      const apiUrl = `https://www.wantgoo.com/stock/${code}/dividend-policy/ex-dividend-data`;
-      const r = await fetch(PROXY + encodeURIComponent(apiUrl));
+      const url = `https://www.wantgoo.com/stock/${code}/enterprise-value/dividend-yield`;
+      const r = await fetch(PROXY + encodeURIComponent(url));
       if (!r.ok) { console.log(code + ' 失敗:', r.status); return; }
-      const data = await r.json();
-      console.log(code + ' 股利資料:', data);
+      const html = await r.text();
 
-      if (!data || !data.length) return;
+      // 從 meta description 解析最新現金股利
+      // 格式範例：「鴻海(2317) 2006年現金殖利率1.36%。公式：現金股利/買進股價*100%...」
+      // 但這只是靜態範例，實際殖利率在 JS 動態載入
+      // 改從 meta-description 抓現金殖利率，再 × 現價 算出每股股利
 
-      // 取最新年度的現金股利加總
-      const latestYear = Math.max(...data.map(d => parseInt(d.year)));
-      const yearData = data.filter(d => parseInt(d.year) === latestYear);
-      const totalCash = yearData
-        .map(d => d.cashDividend === '--' ? 0 : parseFloat(d.cashDividend) || 0)
-        .reduce((a, b) => a + b, 0);
+      // 先找 meta description
+      const metaMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+                        html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i) ||
+                        html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+      const desc = metaMatch ? metaMatch[1] : '';
+      console.log(code + ' meta desc:', desc.substring(0, 100));
 
-      console.log(code + ' 最新年度:', latestYear, '年度現金股利:', totalCash);
+      // 解析「YYYY年現金殖利率X.XX%」
+      const yieldMatch = desc.match(/(\d{4})年現金殖利率(\d+\.?\d*)%/);
+      if (yieldMatch) {
+        const year = parseInt(yieldMatch[1]);
+        const yld  = parseFloat(yieldMatch[2]);
+        console.log(code + ' 年份:', year, '殖利率:', yld + '%');
 
-      if (totalCash > 0) {
-        s.divPerShare = parseFloat(totalCash.toFixed(3));
-        s.annualDiv   = s.divPerShare * s.shares;
-        s.divYield    = s.buyPrice > 0 ? s.divPerShare / s.buyPrice * 100 : null;
+        // 用殖利率 × 買進股價 估算每股股利
+        const usePrice = s.price || s.buyPrice;
+        if (yld > 0 && usePrice > 0) {
+          s.divPerShare = parseFloat((yld / 100 * usePrice).toFixed(2));
+          s.annualDiv   = s.divPerShare * s.shares;
+          s.divYield    = yld;
+          console.log(code + ' 估算每股股利:', s.divPerShare);
+        }
       }
     } catch(e) { console.log(code + ' 錯誤:', e.message); }
   }));
