@@ -587,35 +587,17 @@ async function fetchDividends(stocks) {
   const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
 
   try {
-    const pageUrl = 'https://www.wantgoo.com/stock/2317/dividend-policy/ex-dividend';
-    const pageR = await fetch(PROXY + encodeURIComponent(pageUrl));
-    const pageHtml = await pageR.text();
-
-    const jsUrls = [...pageHtml.matchAll(/src="(\/[^"]*\.js[^"]*)"/g)].map(m => m[1]);
-    console.log('全部 JS files:', jsUrls);
-
-    // 抓所有 JS，找 dividend/API 關鍵字
-    for (const jsPath of jsUrls) {
-      const jsUrl = 'https://www.wantgoo.com' + jsPath;
-      const jsR = await fetch(PROXY + encodeURIComponent(jsUrl));
-      const jsText = await jsR.text();
-
-      // 找所有包含 dividend 或 api 的字串
-      const divMatches = jsText.match(/["'`][^"'`]{0,50}(?:dividend|Dividend|DividendPolicy)[^"'`]{0,50}["'`]/g) || [];
-      const apiPaths   = jsText.match(/["'`](\/[a-zA-Z][^"'`\s]{5,60})["'`]/g) || [];
-
-      if (divMatches.length > 0) {
-        console.log('=== 找到！', jsPath, '===');
-        console.log('dividend 關鍵字:', divMatches.slice(0, 20));
-        console.log('API paths:', apiPaths.slice(0, 30));
-      }
-    }
-    console.log('=== 掃描完成 ===');
+    // 直接抓股利 JS 檔案，找 API endpoint
+    const jsUrl = 'https://www.wantgoo.com/js/stock/dividend-policy/ex-dividend.min.js';
+    const jsR = await fetch(PROXY + encodeURIComponent(jsUrl) + '&v=' + Date.now());
+    const jsText = await jsR.text();
+    console.log('JS 大小:', jsText.length);
+    console.log('JS 全文:', jsText);
   } catch(e) {
-    console.log('探索錯誤:', e.message);
+    console.log('錯誤:', e.message);
   }
 
-  if (statusEl) statusEl.textContent = '探索完成，請看 Console';
+  if (statusEl) statusEl.textContent = '請看 Console';
 }
 
 function renderDivTable(stocks) {
