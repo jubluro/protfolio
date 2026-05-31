@@ -655,6 +655,7 @@ async function fetchDividends(stocks) {
 }
 
 
+function renderDivTable(stocks) {
   document.getElementById('div-tbody').innerHTML = stocks.map(s => {
     const yld    = s.divYield != null
       ? `<span style="color:#a78bfa;font-weight:500">${s.divYield.toFixed(2)}%</span>`
