@@ -594,6 +594,8 @@ async function fetchDividends(stocks) {
       const r = await fetch(PROXY + encodeURIComponent(url));
       if (!r.ok) { console.log(code + ' 失敗:', r.status); return; }
       const html = await r.text();
+      // 印出前 2000 字看 meta 結構
+      console.log(code + ' HTML前2000:', html.substring(0, 2000));
 
       // 從 meta description 解析最新現金股利
       // 格式範例：「鴻海(2317) 2006年現金殖利率1.36%。公式：現金股利/買進股價*100%...」
