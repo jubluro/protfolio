@@ -579,54 +579,40 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（玩股網 enterprise-value/dividend-yield meta 解析）─
+// ── 股利資訊（台灣證交所 Open API - 支援 CORS）──────────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
-  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
+  try {
+    // 證交所 Open API - 上市股票殖利率（直接支援 CORS，不需 proxy）
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    console.log('證交所資料筆數:', data.length, '第一筆:', data[0]);
 
-  await Promise.all(stocks.map(async (s) => {
-    const code = s.code.replace(/\.(TW|TWO)$/i, '');
-    if (!/^\d+$/.test(code)) return;
-    try {
-      const url = `https://www.wantgoo.com/stock/${code}/enterprise-value/dividend-yield`;
-      const r = await fetch(PROXY + encodeURIComponent(url));
-      if (!r.ok) { console.log(code + ' 失敗:', r.status); return; }
-      const html = await r.text();
-      // 印出前 2000 字看 meta 結構
-      console.log(code + ' HTML前2000:', html.substring(0, 2000));
+    // 建立代號 → 殖利率的 map
+    const map = {};
+    data.forEach(d => { map[d['公司代號']] = d; });
 
-      // 從 meta description 解析最新現金股利
-      // 格式範例：「鴻海(2317) 2006年現金殖利率1.36%。公式：現金股利/買進股價*100%...」
-      // 但這只是靜態範例，實際殖利率在 JS 動態載入
-      // 改從 meta-description 抓現金殖利率，再 × 現價 算出每股股利
-
-      // 先找 meta description
-      const metaMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
-                        html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i) ||
-                        html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
-      const desc = metaMatch ? metaMatch[1] : '';
-      console.log(code + ' meta desc:', desc.substring(0, 100));
-
-      // 解析「YYYY年現金殖利率X.XX%」
-      const yieldMatch = desc.match(/(\d{4})年現金殖利率(\d+\.?\d*)%/);
-      if (yieldMatch) {
-        const year = parseInt(yieldMatch[1]);
-        const yld  = parseFloat(yieldMatch[2]);
-        console.log(code + ' 年份:', year, '殖利率:', yld + '%');
-
-        // 用殖利率 × 買進股價 估算每股股利
+    stocks.forEach(s => {
+      const code = s.code.replace(/\.(TW|TWO)$/i, '');
+      const d = map[code];
+      if (!d) return;
+      const yld = parseFloat(d['殖利率']) || null;
+      console.log(code + ' 殖利率:', yld);
+      if (yld && yld > 0) {
         const usePrice = s.price || s.buyPrice;
-        if (yld > 0 && usePrice > 0) {
-          s.divPerShare = parseFloat((yld / 100 * usePrice).toFixed(2));
-          s.annualDiv   = s.divPerShare * s.shares;
-          s.divYield    = yld;
-          console.log(code + ' 估算每股股利:', s.divPerShare);
-        }
+        s.divPerShare = parseFloat((yld / 100 * usePrice).toFixed(2));
+        s.annualDiv   = s.divPerShare * s.shares;
+        s.divYield    = yld;
       }
-    } catch(e) { console.log(code + ' 錯誤:', e.message); }
-  }));
+    });
+  } catch(e) {
+    console.log('證交所 API 錯誤:', e.message);
+    if (statusEl) statusEl.textContent = '殖利率載入失敗';
+    return;
+  }
 
   // KPI 計算（只算有股利的股票）
   let tDiv = 0, tCost = 0, cnt = 0;
