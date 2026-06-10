@@ -560,15 +560,15 @@ async function fetchData() {
     const res  = await fetch(CSV_URL + Date.now());
     if (!res.ok) throw new Error(`HTTP ${res.status} — 請確認 Google Sheets 已發佈至網路`);
     const text = await res.text();
-    if (!text || text.length < 10) throw new Error('回傳資料為空，請確認試算表有資料');
+    if (!text || text.length < 10) throw new Error('回傳資料為空');
     const data = parseCSV(text);
-    if (!data) throw new Error('解析失敗 — 請確認資料格式正確');
+    if (!data) throw new Error('解析失敗');
 
     render(data);
-
     document.getElementById('updAt').textContent =
       new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
-    document.getElementById('price-status').textContent = 'Google Sheets';
+    if (document.getElementById('price-status'))
+      document.getElementById('price-status').textContent = 'Google Sheets';
 
     fetchDividends(data.stocks);
 
@@ -579,69 +579,46 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（台灣證交所 Open API - 支援 CORS）──────────────
+// ── 股利資訊（玩股網 via Cloudflare Worker）─────────────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
+  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
+
+  // 先找殖利率排行頁面的 JS 檔名
   try {
-    // 證交所 Open API - 上市股票殖利率（直接支援 CORS，不需 proxy）
-    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    console.log('證交所資料筆數:', data.length, '第一筆:', data[0]);
+    const pageR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/stock/dividend-yield'));
+    const pageHtml = await pageR.text();
+    const jsFiles = [...pageHtml.matchAll(/src=["']?(\/js\/[^"'\s>]+\.js[^"'\s>]*)["']?/g)].map(m => m[1]);
+    console.log('殖利率頁面 JS:', jsFiles);
 
-    // 建立代號 → 殖利率的 map
-    const map = {};
-    data.forEach(d => { map[d['公司代號']] = d; });
-
-    stocks.forEach(s => {
-      const code = s.code.replace(/\.(TW|TWO)$/i, '');
-      const d = map[code];
-      if (!d) return;
-      const yld = parseFloat(d['殖利率']) || null;
-      console.log(code + ' 殖利率:', yld);
-      if (yld && yld > 0) {
-        const usePrice = s.price || s.buyPrice;
-        s.divPerShare = parseFloat((yld / 100 * usePrice).toFixed(2));
-        s.annualDiv   = s.divPerShare * s.shares;
-        s.divYield    = yld;
+    // 找殖利率相關 JS
+    for (const jsPath of jsFiles) {
+      if (jsPath.includes('dividend') || jsPath.includes('yield')) {
+        const jsR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com' + jsPath));
+        const jsText = await jsR.text();
+        console.log(jsPath + ' 內容:', jsText.substring(0, 500));
       }
-    });
-  } catch(e) {
-    console.log('證交所 API 錯誤:', e.message);
-    if (statusEl) statusEl.textContent = '殖利率載入失敗';
-    return;
-  }
-
-  // KPI 計算（只算有股利的股票）
-  let tDiv = 0, tCost = 0, cnt = 0;
-  stocks.forEach(s => {
-    if (s.annualDiv && s.annualDiv > 0) {
-      tDiv  += s.annualDiv;
-      tCost += s.cost;
-      cnt++;
     }
-  });
 
-  if (cnt > 0) {
-    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
-    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
-    const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
-    document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
-  } else {
-    document.getElementById('k-divamt').textContent = '—';
-    document.getElementById('k-divamt-sub').textContent = '無股利資料';
-    document.getElementById('k-divy').textContent = '—';
-  }
+    // 同時試幾個可能的 API endpoint
+    const testUrls = [
+      'https://www.wantgoo.com/stock/all-dividend-yield-data',
+      'https://www.wantgoo.com/stock/dividend-yield/data',
+      'https://www.wantgoo.com/api/stock/dividend-yield/all',
+      'https://www.wantgoo.com/api/v1/stock/all-yield',
+      'https://www.wantgoo.com/stock/all-close-info?type=yield',
+    ];
+    for (const url of testUrls) {
+      const r = await fetch(PROXY + encodeURIComponent(url));
+      const text = await r.text();
+      console.log('測試:', url, '狀態:', r.status, '前100:', text.substring(0, 100));
+    }
+  } catch(e) { console.log('探索錯誤:', e.message); }
 
-  renderDivTable(stocks);
-  renderStockCards(stocks);
-  if (statusEl) statusEl.textContent = cnt > 0
-    ? `${cnt}/${stocks.length} 檔有股利・玩股網`
-    : '無股利資料';
+  if (statusEl) statusEl.textContent = '請看 Console';
 }
-
 
 function renderDivTable(stocks) {
   document.getElementById('div-tbody').innerHTML = stocks.map(s => {
