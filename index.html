@@ -586,36 +586,21 @@ async function fetchDividends(stocks) {
 
   const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
 
-  // 先找殖利率排行頁面的 JS 檔名
   try {
-    const pageR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/stock/dividend-yield'));
-    const pageHtml = await pageR.text();
-    const jsFiles = [...pageHtml.matchAll(/src=["']?(\/js\/[^"'\s>]+\.js[^"'\s>]*)["']?/g)].map(m => m[1]);
-    console.log('殖利率頁面 JS:', jsFiles);
+    // 先看 all-close-info?type=yield 的完整內容
+    const r1 = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/stock/all-close-info?type=yield'));
+    const t1 = await r1.text();
+    console.log('all-close-info?type=yield 完整:', t1.substring(0, 2000));
 
-    // 找殖利率相關 JS
-    for (const jsPath of jsFiles) {
-      if (jsPath.includes('dividend') || jsPath.includes('yield')) {
-        const jsR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com' + jsPath));
-        const jsText = await jsR.text();
-        console.log(jsPath + ' 內容:', jsText.substring(0, 500));
-      }
-    }
-
-    // 同時試幾個可能的 API endpoint
-    const testUrls = [
-      'https://www.wantgoo.com/stock/all-dividend-yield-data',
-      'https://www.wantgoo.com/stock/dividend-yield/data',
-      'https://www.wantgoo.com/api/stock/dividend-yield/all',
-      'https://www.wantgoo.com/api/v1/stock/all-yield',
-      'https://www.wantgoo.com/stock/all-close-info?type=yield',
-    ];
-    for (const url of testUrls) {
-      const r = await fetch(PROXY + encodeURIComponent(url));
-      const text = await r.text();
-      console.log('測試:', url, '狀態:', r.status, '前100:', text.substring(0, 100));
-    }
-  } catch(e) { console.log('探索錯誤:', e.message); }
+    // 再抓 dividend-yield JS 找 API
+    const jsR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/js/stock/dividend-policy/dividend-yield.min.js'));
+    const jsText = await jsR.text();
+    // 找 $.http.get 或 fetch 的路徑
+    const apiMatches = jsText.match(/["'`](\/[^"'`\s]{5,80})["'`]/g) || [];
+    const httpMatches = jsText.match(/\$\.http\.get\([^)]+\)/g) || [];
+    console.log('dividend-yield JS API paths:', apiMatches.slice(0, 30));
+    console.log('http.get calls:', httpMatches.slice(0, 20));
+  } catch(e) { console.log('錯誤:', e.message); }
 
   if (statusEl) statusEl.textContent = '請看 Console';
 }
