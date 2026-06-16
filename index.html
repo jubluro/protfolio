@@ -600,8 +600,7 @@ async function fetchDividends(stocks) {
     const httpMatches = jsText.match(/\$\.http\.get\([^)]+\)/g) || [];
     console.log('dividend-yield JS API paths:', apiMatches);
     console.log('http.get calls:', httpMatches);
-    console.log('JS 全文長度:', jsText.length);
-    console.log('JS 全文:', jsText);
+    console.log('JS 後半段:', jsText.substring(5000));
   } catch(e) { console.log('錯誤:', e.message); }
 
   if (statusEl) statusEl.textContent = '請看 Console';
