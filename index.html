@@ -598,8 +598,10 @@ async function fetchDividends(stocks) {
     // 找 $.http.get 或 fetch 的路徑
     const apiMatches = jsText.match(/["'`](\/[^"'`\s]{5,80})["'`]/g) || [];
     const httpMatches = jsText.match(/\$\.http\.get\([^)]+\)/g) || [];
-    console.log('dividend-yield JS API paths:', apiMatches.slice(0, 30));
-    console.log('http.get calls:', httpMatches.slice(0, 20));
+    console.log('dividend-yield JS API paths:', apiMatches);
+    console.log('http.get calls:', httpMatches);
+    console.log('JS 全文長度:', jsText.length);
+    console.log('JS 全文:', jsText);
   } catch(e) { console.log('錯誤:', e.message); }
 
   if (statusEl) statusEl.textContent = '請看 Console';
