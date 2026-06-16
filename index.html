@@ -579,32 +579,82 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（玩股網 via Cloudflare Worker）─────────────────
+// ── 股利資訊（證交所+櫃買中心 OpenAPI，直接支援 CORS）────────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
 
-  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
+  let map = {};
 
   try {
-    // 先看 all-close-info?type=yield 的完整內容
-    const r1 = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/stock/all-close-info?type=yield'));
-    const t1 = await r1.text();
-    console.log('all-close-info?type=yield 完整:', t1.substring(0, 2000));
+    // 上市：證交所 OpenAPI（殖利率欄位：DividendYield）
+    const r1 = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL');
+    if (r1.ok) {
+      const d1 = await r1.json();
+      d1.forEach(d => {
+        if (d.Code) map[d.Code] = { yield: parseFloat(d.DividendYield) || null };
+      });
+      console.log('證交所筆數:', d1.length, '範例:', d1[0]);
+    }
+  } catch(e) { console.log('TWSE 錯誤:', e.message); }
 
-    // 再抓 dividend-yield JS 找 API
-    const jsR = await fetch(PROXY + encodeURIComponent('https://www.wantgoo.com/js/stock/dividend-policy/dividend-yield.min.js'));
-    const jsText = await jsR.text();
-    // 找 $.http.get 或 fetch 的路徑
-    const apiMatches = jsText.match(/["'`](\/[^"'`\s]{5,80})["'`]/g) || [];
-    const httpMatches = jsText.match(/\$\.http\.get\([^)]+\)/g) || [];
-    console.log('dividend-yield JS API paths:', apiMatches);
-    console.log('http.get calls:', httpMatches);
-    console.log('JS 後半段:', jsText.substring(5000));
-  } catch(e) { console.log('錯誤:', e.message); }
+  try {
+    // 上櫃：櫃買中心 OpenAPI（殖利率欄位需確認）
+    const r2 = await fetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_anal');
+    if (r2.ok) {
+      const d2 = await r2.json();
+      console.log('櫃買筆數:', d2.length, '範例:', d2[0]);
+      d2.forEach(d => {
+        const code = d.SecuritiesCompanyCode || d.Code || d.code || d.StockCode;
+        if (!code) return;
+        const yld = parseFloat(d.DividendYield || d.Yield || d.yield || d['殖利率']) || null;
+        if (!map[code]) map[code] = { yield: yld };
+        else if (yld) map[code].yield = yld;
+      });
+    }
+  } catch(e) { console.log('TPEX 錯誤:', e.message); }
 
-  if (statusEl) statusEl.textContent = '請看 Console';
+  // 套用殖利率
+  stocks.forEach(s => {
+    const code = s.code.replace(/\.(TW|TWO)$/i, '');
+    const d = map[code];
+    if (!d || !d.yield) return;
+    const usePrice = s.price || s.buyPrice;
+    if (!usePrice) return;
+    s.divPerShare = parseFloat((d.yield / 100 * usePrice).toFixed(2));
+    s.annualDiv   = s.divPerShare * s.shares;
+    s.divYield    = d.yield;
+    console.log(code + ' 殖利率:', d.yield, '每股股利:', s.divPerShare);
+  });
+
+  // KPI 計算（只算有股利的股票，排除槓桿ETF）
+  let tDiv = 0, tCost = 0, cnt = 0;
+  stocks.forEach(s => {
+    if (s.annualDiv && s.annualDiv > 0) {
+      tDiv  += s.annualDiv;
+      tCost += s.cost;
+      cnt++;
+    }
+  });
+
+  if (cnt > 0) {
+    document.getElementById('k-divamt').textContent = 'NT$' + Math.round(tDiv).toLocaleString('zh-TW');
+    document.getElementById('k-divamt-sub').textContent = `預估年收股利（${cnt} 檔有股利）`;
+    const divRoi = tCost > 0 ? tDiv / tCost * 100 : 0;
+    document.getElementById('k-divy').textContent = divRoi.toFixed(2) + '%';
+  } else {
+    document.getElementById('k-divamt').textContent = '—';
+    document.getElementById('k-divamt-sub').textContent = '無股利資料';
+    document.getElementById('k-divy').textContent = '—';
+  }
+
+  renderDivTable(stocks);
+  renderStockCards(stocks);
+  if (statusEl) statusEl.textContent = cnt > 0
+    ? `${cnt}/${stocks.length} 檔・證交所+櫃買中心`
+    : '無股利資料';
 }
+
 
 function renderDivTable(stocks) {
   document.getElementById('div-tbody').innerHTML = stocks.map(s => {
