@@ -526,12 +526,9 @@ function parseCSV(text) {
       roi:          parseRoi(r[8]),
       change:       r[9] != null && r[9] !== '' ? parseChangePct(r[9]) : null,
       divPerShare:  parseNum(r[10]), // K欄：每股股利
+      annualDiv:    null,
+      divYield:     null,
     };
-
-    // 計算年化股利和殖利率
-    s.annualDiv = s.divPerShare > 0 ? s.divPerShare * s.shares : null;
-    s.divYield  = s.divPerShare > 0 && s.buyPrice > 0
-      ? s.divPerShare / s.buyPrice * 100 : null;
     // 跳過完全空白的資料列
     if (s.cost === 0 && s.mktVal === 0 && s.buyPrice === 0 && !s.name) continue;
     stocks.push(s);
@@ -575,30 +572,37 @@ async function fetchData() {
   }
 }
 
-// ── 股利資訊（證交所 OpenAPI via Cloudflare Worker）───────────
+// ── 股利資訊（FinMind TaiwanStockDividend API via Worker）──────
 async function fetchDividends(stocks) {
   const statusEl = document.getElementById('div-status');
   if (statusEl) statusEl.textContent = '股利資料載入中...';
-  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
-  let map = {};
-  try {
-    const r = await fetch(PROXY + encodeURIComponent('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL'));
-    if (r.ok) {
-      const data = await r.json();
-      data.forEach(d => { if (d.Code) map[d.Code] = parseFloat(d.DividendYield) || null; });
-    }
-  } catch(e) { console.log('TWSE 錯誤:', e.message); }
 
-  stocks.forEach(s => {
+  const PROXY = 'https://black-hill-2aaa.jubluro.workers.dev/?url=';
+  const today = new Date().toISOString().slice(0, 10);
+  const startDate = new Date().getFullYear() - 1 + '-01-01'; // 往前一年
+
+  await Promise.all(stocks.map(async (s) => {
     const code = s.code.replace(/\.(TW|TWO)$/i, '');
-    const yld = map[code];
-    if (!yld) return;
-    const usePrice = s.price || s.buyPrice;
-    if (!usePrice) return;
-    s.divPerShare = parseFloat((yld / 100 * usePrice).toFixed(2));
-    s.annualDiv   = s.divPerShare * s.shares;
-    s.divYield    = yld;
-  });
+    if (!/^\d+$/.test(code)) return;
+    try {
+      const apiUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDividend&data_id=${code}&start_date=${startDate}`;
+      const r = await fetch(PROXY + encodeURIComponent(apiUrl));
+      if (!r.ok) return;
+      const j = await r.json();
+      const data = j?.data;
+      if (!data || !data.length) return;
+
+      // 取最新一筆（按 date 排序最後一筆）
+      const latest = data.sort((a, b) => b.date.localeCompare(a.date))[0];
+      const cash = (latest.CashEarningsDistribution || 0) + (latest.CashStatutorySurplus || 0);
+      if (cash > 0) {
+        s.divPerShare = parseFloat(cash.toFixed(2));
+        s.annualDiv   = s.divPerShare * s.shares;
+        s.divYield    = s.buyPrice > 0 ? s.divPerShare / s.buyPrice * 100 : null;
+        console.log(code + ' 每股現金股利:', s.divPerShare, '年度:', latest.year);
+      }
+    } catch(e) { console.log(code + ' 錯誤:', e.message); }
+  }));
 
   let tDiv = 0, tCost = 0, cnt = 0;
   stocks.forEach(s => {
@@ -617,7 +621,7 @@ async function fetchDividends(stocks) {
 
   renderDivTable(stocks);
   renderStockCards(stocks);
-  if (statusEl) statusEl.textContent = cnt + '/' + stocks.length + ' 檔・證交所即時';
+  if (statusEl) statusEl.textContent = cnt + '/' + stocks.length + ' 檔・FinMind 即時';
 }
 
 function renderDivTable(stocks) {
